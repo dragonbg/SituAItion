@@ -1,48 +1,60 @@
-from ollama import chat
-from pydantic import BaseModel
-import datetime
-import random
-import textwrap
+from __future__ import annotations
 
-class Memory(BaseModel):
-    observation: str
-    timestamp: datetime.datetime
-    importance: int = 5
+from dataclasses import dataclass
+from typing import Any, Optional
+import os
 
-class GenerativeAgent:
-    def __init__(self, name: str, traits: str, goal: str = ""):
-        self.name = name
-        self.traits = traits
-        self.goal = goal
-        self.memory_stream: list[Memory] = []
-        self.clock = 0.0
 
-    def observe(self, observation: str):
-        self.memory_stream.append(Memory(observation=observation, timestamp=datetime.datetime.now()))
+@dataclass(frozen=True)
+class LlmConfig:
+    model: str = "qwen3:8b"
+    temperature: float = 0.7
+    num_predict: int = 450
+    timeout_s: float = 90.0
+    keep_alive: str = "10m"
 
-    def react(self, situation: str) -> str:
-        context = textwrap.shorten(
-            "\n".join([m.observation for m in self.memory_stream[-3:]]),
-            width=600, placeholder="..."
-        )
 
-        prompt = f"""You are {self.name} ({self.traits}).
-Context (last 3 turns only): {context}
-Current time: {self.clock:.1f}s
-Situation: {situation}
+class LlmAgent:
+    """
+    Thin wrapper around an LLM chat call with shared safety constraints.
 
-EXACT FORMAT (keep it short!):
-1. t=XX.Xs: [specific micro-action: touch, posture, eye contact, laugh etc.]
-2. t=XX.Xs: ...
+    This project intentionally avoids "micro-action manipulation scripts" and instead
+    generates consent-first, low-pressure, honest communication plans.
+    """
 
-Exact words: "..."
-Be novel and slightly weird if it helps rapport. No clichés."""
+    def __init__(self, *, llm: Optional[LlmConfig] = None):
+        self.llm = llm or LlmConfig()
+        self._client = None
 
-        resp = chat(
-            model="qwen3:8b",
+    def _get_client(self):
+        try:
+            import ollama  # type: ignore
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(
+                "Missing dependency: the Python package 'ollama' is not installed.\n"
+                "Install it with: pip install ollama\n"
+                "Then make sure the Ollama app/service is running and the model is pulled "
+                f"(e.g. 'ollama pull {self.llm.model}')."
+            ) from e
+
+        if self._client is None:
+            # ollama.Client passes kwargs to the underlying HTTP client (httpx),
+            # so we can set a hard timeout to avoid indefinite hangs.
+            timeout = float(os.getenv("SITUAITION_TIMEOUT_S", str(self.llm.timeout_s)))
+            self._client = ollama.Client(timeout=timeout)
+        return self._client
+
+    def complete(self, prompt: str, *, json_mode: bool = False) -> str:
+        client = self._get_client()
+        resp: dict[str, Any] = client.chat(
+            model=self.llm.model,
             messages=[{"role": "user", "content": prompt}],
-            options={"num_predict": 180, "temperature": 0.9}
+            format="json" if json_mode else None,
+            options={
+                "temperature": self.llm.temperature,
+                "num_predict": self.llm.num_predict,
+            },
+            keep_alive=self.llm.keep_alive,
         )
-        self.clock += random.uniform(1.6, 3.5)
-        return resp['message']['content']
+        return str(resp.get("message", {}).get("content", "")).strip()
 

@@ -17,6 +17,9 @@ env/
 # Gradio local state
 .gradio/
 
+# Learned/persistent local state
+psyche_memory/
+
 # Tool caches
 .pytest_cache/
 .mypy_cache/
