@@ -1,0 +1,9 @@
+litellm
+langgraph
+langchain-community
+pydantic
+fastapi
+uvicorn
+numpy
+gradio
+
