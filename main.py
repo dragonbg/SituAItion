@@ -1,22 +1,12 @@
+import gradio as gr
 import os
-
 os.environ["OLLAMA_NUM_PARALLEL"] = "1"
 
-from fastapi import FastAPI
 from src.optimizer import monte_carlo_optimize
-import gradio as gr
 
-app = FastAPI()
-
-@app.post("/predict")
-def predict(scenario: str, you_traits: str, target_traits: str):
-    result = monte_carlo_optimize(scenario, you_traits, target_traits)
-    return {"golden_path": result["path"], "success_estimate": result["score"]}
-
-# Gradio UI for quick testing
 def gradio_ui(scenario, you_traits, target_traits):
-    result = monte_carlo_optimize(scenario, you_traits, target_traits, num_sims=8)
-    return "\n\n".join(result["path"]) + "\n\nSuccess estimate: " + str(result["score"])
+    result = monte_carlo_optimize(scenario, you_traits, target_traits)
+    return "\n\n".join(result["path"]) + f"\n\n🎯 Success estimate: {result['score']}"
 
 iface = gr.Interface(
     fn=gradio_ui,
@@ -27,6 +17,6 @@ iface = gr.Interface(
     ],
     outputs="text",
     title="SituAItion — Multiverse Social God",
-    description="Pure Ollama + tight caps for faster runs."
+    description="~40-60s total on 1070 Ti (precise timing + novel micro-actions)"
 )
-iface.launch(share=False)
+iface.launch()
