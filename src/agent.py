@@ -1,7 +1,10 @@
-from litellm import completion
 from pydantic import BaseModel
 
 import datetime
+import random
+import textwrap
+
+from ollama import chat
 
 
 class Memory(BaseModel):
@@ -16,43 +19,38 @@ class GenerativeAgent:
         self.traits = traits
         self.goal = goal
         self.memory_stream: list[Memory] = []
-        self.current_time = datetime.datetime.now()
+        self.clock = 0.0
 
     def observe(self, observation: str):
         self.memory_stream.append(
-            Memory(
-                observation=observation,
-                timestamp=self.current_time,
-            )
+            Memory(observation=observation, timestamp=datetime.datetime.now())
         )
-
-    def reflect(self):
-        if len(self.memory_stream) < 5:
-            return
-        recent = "\n".join([m.observation for m in self.memory_stream[-10:]])
-        prompt = (
-            f"You are {self.name} ({self.traits}, goal: {self.goal}). Reflect on recent events and "
-            f"give 3-5 insights about your feelings/relationships:\n{recent}\nOutput only bullets."
-        )
-        response = completion(
-            model="ollama/qwen2.5:14b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-        )
-        insights = response.choices[0].message.content
-        self.observe(f"Reflection: {insights}")
 
     def react(self, situation: str) -> str:
-        relevant = sorted(self.memory_stream, key=lambda m: m.importance, reverse=True)[:5]
-        context = "\n".join([m.observation for m in relevant])
-        prompt = f"""You are {self.name} ({self.traits}). 
-Context: {context}
-Situation: {situation}
-Respond with extremely specific micro-actions: exact words, timing (e.g. t=3.2s), body language, tone. Be novel and realistic."""
-        response = completion(
-            model="ollama/qwen2.5:14b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
+        context = textwrap.shorten(
+            "\n".join([m.observation for m in self.memory_stream[-3:]]),
+            width=600,
+            placeholder="...",
         )
-        return response.choices[0].message.content
+
+        situation = (situation or "")[-1200:]
+        prompt = f"""You are {self.name} ({self.traits}).
+Context (last 3 turns only): {context}
+Current time: {self.clock:.1f}s
+Situation: {situation}
+
+EXACT FORMAT (short!):
+1. t=XX.Xs: [specific micro-action: touch/posture/eye/laugh etc.]
+2. t=XX.Xs: ...
+
+Exact words: "..."
+Novel + slightly weird if it helps. No clichés."""
+
+        resp = chat(
+            model="qwen3:8b",
+            messages=[{"role": "user", "content": prompt}],
+            options={"num_predict": 180, "temperature": 0.9},
+        )
+        self.clock += random.uniform(1.6, 3.5)
+        return resp["message"]["content"]
 

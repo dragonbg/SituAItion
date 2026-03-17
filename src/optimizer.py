@@ -1,53 +1,40 @@
-import asyncio
+from ollama import chat
+from tqdm import tqdm
 
-from litellm import completion
-
-from .agent import GenerativeAgent
+from src.agent import GenerativeAgent
 
 
-async def run_one_simulation(
-    you_traits: str,
-    target_traits: str,
-    scenario: str,
-    num_turns: int = 8,
-):
+def run_one_simulation(you_traits: str, target_traits: str, scenario: str, num_turns: int = 8):
     you = GenerativeAgent("You", you_traits, goal="make target like me more + get IG")
     target = GenerativeAgent("Target", target_traits)
 
-    history = []
+    history: list[str] = []
     for turn in range(num_turns):
-        you_action = you.react(f"Current situation after turn {turn}: {history}")
-        target_action = target.react(f"You just experienced: {you_action}")
-        history.append(f"t={turn*2}s: You: {you_action} | Target: {target_action}")
+        you_action = you.react(f"Turn {turn+1}/{num_turns}. Recent: {history[-3:]}")
+        target_action = target.react(f"You experienced: {you_action}")
+        history.append(you_action)
         you.observe(target_action)
         target.observe(you_action)
 
-    judge_prompt = (
-        "Rate final liking increase 0-100 and realism. "
-        f"Scenario: {scenario}\nConversation:\n" + "\n".join(history)
+    judge_msg = (
+        "Rate liking increase 0-100. ONLY the number.\n"
+        f"Scenario: {scenario}\n"
+        "Last turns:\n"
+        + "\n".join(history[-4:])
     )
-    score_response = completion(
-        model="ollama/qwen2.5:14b",
-        messages=[{"role": "user", "content": judge_prompt}],
+    judge = chat(
+        model="qwen3:8b",
+        messages=[{"role": "user", "content": judge_msg}],
+        options={"num_predict": 30},
     )
-    score = score_response.choices[0].message.content
+    score = judge["message"]["content"]
     return {"path": history, "score": score}
 
 
-async def monte_carlo_optimize(
-    scenario: str,
-    you_traits: str,
-    target_traits: str,
-    num_simulations: int = 30,
-):
-    tasks = [run_one_simulation(you_traits, target_traits, scenario) for _ in range(num_simulations)]
-    results = await asyncio.gather(*tasks)
-
-    def _score_to_int(score_text: str) -> int:
-        head = (score_text or "")[:3]
-        digits = "".join(filter(str.isdigit, head))
-        return int(digits or 0)
-
-    best = max(results, key=lambda x: _score_to_int(x["score"]))
+def monte_carlo_optimize(scenario: str, you_traits: str, target_traits: str, num_sims: int = 8):
+    results = []
+    for _ in tqdm(range(num_sims), desc="Universes"):
+        results.append(run_one_simulation(you_traits, target_traits, scenario))
+    best = max(results, key=lambda x: int("".join(filter(str.isdigit, str(x["score"]))[:3]) or 0))
     return best
 
