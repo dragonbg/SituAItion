@@ -6,5 +6,8 @@ uvicorn
 numpy
 gradio
 ollama
+groq
 tqdm
+chromadb
+torch
 

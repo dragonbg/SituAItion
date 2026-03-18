@@ -6,6 +6,12 @@ import random
 from dataclasses import dataclass
 from typing import Any
 
+try:  # Optional – only present when Groq backend is installed
+    from groq import BadRequestError as _GroqBadRequestError  # type: ignore
+except Exception:  # pragma: no cover - dependency optional
+    class _GroqBadRequestError(Exception):
+        pass
+
 from tqdm import tqdm
 
 from src.agent import LlmAgent, LlmConfig
@@ -29,16 +35,13 @@ class ScoredPlan:
 
 
 _MANIPULATION_RED_FLAGS = [
+    # Keep this list narrow to avoid penalizing legitimate wording.
+    "force",
+    "trick",
+    "guilt",
     "lie",
     "fake",
-    "pretend",
-    "negg",
-    "pressure",
-    "guilt",
-    "trick",
-    "manipulat",
-    "make them",
-    "force",
+    "blackmail",
 ]
 
 
@@ -145,7 +148,7 @@ def judge_plan(
     plan: CandidatePlan,
     llm: LlmAgent | None = None,
 ) -> ScoredPlan:
-    agent = llm or LlmAgent(llm=LlmConfig(temperature=0.2, num_predict=220))
+    agent = llm or LlmAgent(llm=LlmConfig(temperature=0.2, num_predict=120))
 
     prompt = f"""
 You are judging a proposed social interaction plan.
@@ -161,15 +164,29 @@ Exact words: {plan.exact_words}
 Fallback if no: {plan.fallback_if_no}
 """.strip()
 
-    raw = agent.complete(prompt, json_mode=True)
-    data = _safe_json_loads(raw) or {}
-    score = data.get("score")
-    if not isinstance(score, int):
-        score = _extract_int(str(score) if score is not None else raw)
+    try:
+        raw = agent.complete(prompt, json_mode=True)
+    except _GroqBadRequestError as err:  # type: ignore[arg-type]
+        if "json_validate_failed" not in str(err):
+            raise
+        raw = agent.complete(prompt, json_mode=False)
+        parsed = _try(raw)
+    else:
+        parsed = _try(raw)
+    if parsed is None:
+        raw2 = agent.complete(prompt, json_mode=False)
+        parsed = _try(raw2)
+
+    if parsed is None:
+        fallback_text = raw or raw2 or ""
+        extracted = _extract_int(fallback_text)
+        score = extracted if extracted != 0 else 50
+        notes = ""
+    else:
+        score, notes = parsed
 
     text_blob = " ".join([plan.title, " ".join(plan.steps), plan.exact_words, plan.fallback_if_no, plan.notes])
     score = max(0, min(100, int(score) - _red_flag_penalty(text_blob)))
-    notes = str(data.get("notes", "")).strip() if isinstance(data, dict) else ""
     return ScoredPlan(plan=plan, score=score, judge_notes=notes or (raw[:400] if raw else ""))
 
 
@@ -215,7 +232,7 @@ Constraints:
 - You can warm up with light context before asking, if appropriate.
 - Avoid repeating the same wording across candidates.
 - Vary intent across candidates: some should be small-talk / rapport, some a segue, some a direct low-pressure ask (depending on turn).
-- IMPORTANT: If this is an early turn, do NOT ask for Instagram yet. Build rapport first.
+- IMPORTANT: If this is an early turn, do NOT ask for IG/contact.
 
 Return ONLY valid JSON: an array of {k} strings. No other text.
 
@@ -384,18 +401,27 @@ Conversation (recent):
         nt_s = str(nt).strip() if nt is not None else ""
         return sc, nt_s
 
-    raw = llm.complete(prompt, json_mode=True)
-    parsed = _try(raw)
+    try:
+        raw = llm.complete(prompt, json_mode=True)
+    except _GroqBadRequestError as err:  # type: ignore[arg-type]
+        if "json_validate_failed" not in str(err):
+            raise
+        raw = llm.complete(prompt, json_mode=False)
+        parsed = _try(raw)
+    else:
+        parsed = _try(raw)
     if parsed is None:
         raw2 = llm.complete(prompt, json_mode=False)
         parsed = _try(raw2)
 
     if parsed is None:
-        extracted = _extract_int(raw)
+        fallback_text = raw or raw2 or ""
+        extracted = _extract_int(fallback_text)
         score = extracted if extracted != 0 else 50
         notes = ""
     else:
         score, notes = parsed
+
     text_blob = " ".join(history[-12:])
     score = max(0, min(100, int(score) - _red_flag_penalty(text_blob)))
     return score, notes or (raw[:250] if raw else "")
@@ -479,6 +505,9 @@ def beam_search_simulation(
     for t in range(turns):
         _progress(0.01 + 0.02 * (t / max(1, turns)), f"Expanding turn {t+1}/{turns}...")
         candidates: list[SimState] = []
+        # Cross-beam dedup: if different beam states propose the same "You" message,
+        # keep only the first to avoid wasting compute on identical expansions.
+        seen_you_msgs: set[str] = set()
 
         for b_idx, state in enumerate(beams, start=1):
             you_msgs = propose_next_messages(
@@ -491,6 +520,11 @@ def beam_search_simulation(
                 llm=proposer_llm,
             )
             for m_idx, you_msg in enumerate(you_msgs, start=1):
+                key = " ".join((you_msg or "").lower().split())
+                if key in seen_you_msgs:
+                    continue
+                seen_you_msgs.add(key)
+
                 done += 1
                 _progress(
                     0.05 + 0.90 * (done / total_expansions),
@@ -576,29 +610,102 @@ def _rollout_one(
     seed_history: list[str] | None,
     proposer_llm: LlmAgent,
     actor_llm: LlmAgent,
+    progress_cb: Any | None = None,
+    progress_base: float = 0.0,
+    progress_span: float = 0.0,
+    use_generative_agents: bool = False,
 ) -> list[str]:
     history: list[str] = list(seed_history or [])
-    for _ in range(max(1, int(turns))):
-        you_msg = propose_next_messages(
-            scenario=scenario,
+
+    def _p_local(step_frac: float, desc: str):
+        if progress_cb is None or progress_span <= 0:
+            return
+        try:
+            progress_cb(progress_base + progress_span * step_frac, desc=desc)
+        except Exception:
+            return
+
+    def write_next_message() -> str:
+        # Faster than propose_next_messages(k=1): no JSON, shorter output.
+        recent = "\n".join(history[-8:]) if history else "(start)"
+        you_turn = 1 + sum(1 for h in history if h.startswith("You:"))
+        early = you_turn <= 1
+        prompt = f"""
+Write the next message for "You" (1–2 sentences).
+Constraints:
+- Natural, specific, human.
+- No deception or coercion; accept a clear no.
+- If this is turn 1: rapport only (no asking for IG/number).
+- If turn>=2: you may segue toward the goal, low-pressure.
+
+Scenario: {scenario}
+Goal: {goal}
+You traits: {you_traits}
+Target traits: {target_traits}
+Approach style hint: {approach}
+Conversation so far:
+{recent}
+""".strip()
+        msg = (proposer_llm.complete(prompt, json_mode=False) or "").replace("\uFFFD", "").strip()
+        if not msg:
+            return "Hey—how’s your day going so far?" if early else "By the way—are you on Instagram? No worries if not."
+        # Strip accidental bullets/quotes
+        msg = msg.strip().strip('"').strip()
+        return msg
+
+    # Optional: use Stanford-style agents (memory/reflection) during rollouts.
+    you_agent = None
+    target_agent = None
+    if use_generative_agents:
+        from src.agent import GenerativeAgent
+
+        you_agent = GenerativeAgent(
+            name="You",
+            traits=you_traits,
             goal=goal,
-            you_traits=you_traits,
-            target_traits=target_traits,
-            history=history,
-            k=1,
-            llm=proposer_llm,
-        )[0]
-        # Lightly steer with the approach by appending a hint into the message itself (keeps it message-level).
-        if approach and approach.strip():
-            you_msg = f"{you_msg}"
-        history.append(f"You: {you_msg}")
-        target_msg = simulate_target_reply(
             scenario=scenario,
-            you_traits=you_traits,
             target_traits=target_traits,
-            history=history,
+            psyche_hat=None,
+            llm=proposer_llm,
+        )
+        target_agent = GenerativeAgent(
+            name="Target",
+            traits=target_traits,
+            goal="Respond naturally; be open if comfortable, deflect if not.",
+            scenario=scenario,
+            target_traits=target_traits,
+            psyche_hat=None,
             llm=actor_llm,
         )
+
+    for t in range(max(1, int(turns))):
+        _p_local((t + 0.05) / max(1, int(turns)), f"Sim turn {t+1}/{turns} — drafting your message...")
+        if you_agent is not None:
+            situation = f"Turn {t+1}. Scenario: {scenario}"
+            you_msg = you_agent.react_message(situation=situation, approach=approach)
+        else:
+            you_msg = write_next_message()
+        history.append(f"You: {you_msg}")
+
+        _p_local((t + 0.35) / max(1, int(turns)), f"Sim turn {t+1}/{turns} — simulating target reply...")
+        if target_agent is not None:
+            target_msg = target_agent.react_message(
+                situation=f"You received: {you_msg}", approach=""
+            )
+            # Update memory streams a bit
+            you_agent.observe(f"Target: {target_msg}", importance=7)
+            target_agent.observe(f"You: {you_msg}", importance=6)
+            if (t + 1) % 3 == 0:
+                you_agent.reflect()
+                target_agent.reflect()
+        else:
+            target_msg = simulate_target_reply(
+                scenario=scenario,
+                you_traits=you_traits,
+                target_traits=target_traits,
+                history=history,
+                llm=actor_llm,
+            )
         history.append(f"Target: {target_msg}")
     return history
 
@@ -653,6 +760,7 @@ def evolutionary_search_and_render(
     progress: Any | None = None,
     hat: PsycheHat | None = None,
     ab_test_hat: bool = False,
+    use_generative_agents: bool = False,
 ) -> dict[str, Any]:
     """
     Phase 1/2 evolutionary search over SHORT messages.
@@ -699,7 +807,7 @@ def evolutionary_search_and_render(
 
     # ── Phase 1: explore ─────────────────────────────────────────
     for i in range(phase1):
-        _p(i / sims, f"Phase 1 — exploring {i+1}/{phase1}...")
+        _p((i + 0.10) / sims, f"Phase 1 — exploring {i+1}/{phase1}...")
         approach = random.choice(approaches)
         # Optional A/B: every other sim uses the hat recommendation as a bias (if any).
         if ab_test_hat and hat_rec and i % 2 == 0:
@@ -714,6 +822,10 @@ def evolutionary_search_and_render(
             seed_history=None,
             proposer_llm=proposer_llm,
             actor_llm=actor_llm,
+            progress_cb=progress,
+            progress_base=(i / sims),
+            progress_span=(0.8 / sims),
+            use_generative_agents=use_generative_agents,
         )
         # Cheap pre-score; we will LLM-judge only the top few later (much faster).
         pre = 50 + _heuristic_reward(goal, history)
@@ -738,7 +850,7 @@ def evolutionary_search_and_render(
     for w_idx, w in enumerate(winners, start=1):
         for m in range(per_winner):
             done = phase1 + (w_idx - 1) * per_winner + m
-            _p(done / sims, f"Phase 2 — branching winner {w_idx}/{len(winners)}...")
+            _p((done + 0.10) / sims, f"Phase 2 — branching winner {w_idx}/{len(winners)}...")
             mutated = f"{w['approach']} + {random.choice(approaches)}"
             seed = w["history"][:4]  # seed ~2 exchanges (You+Target)
             history = _rollout_one(
@@ -751,6 +863,10 @@ def evolutionary_search_and_render(
                 seed_history=seed,
                 proposer_llm=proposer_llm,
                 actor_llm=actor_llm,
+                progress_cb=progress,
+                progress_base=(done / sims),
+                progress_span=(0.7 / sims),
+                use_generative_agents=use_generative_agents,
             )
             pre = 50 + _heuristic_reward(goal, history)
             results.append({"history": history, "score": int(pre), "approach": mutated, "judge_notes": ""})

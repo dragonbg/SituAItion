@@ -10,6 +10,7 @@ env/
 # Local env files / secrets
 .env
 .env.*
+!.env.example
 
 # Editor / IDE
 .vscode/
