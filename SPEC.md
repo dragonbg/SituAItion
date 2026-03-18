@@ -133,7 +133,7 @@ src/
 - **`_MANIPULATION_RED_FLAGS` is narrowed** to hard coercion only. Don't re-expand it to penalize normal social words.
 - **PsycheHat heavy is additive**, not a replacement. `psyche_hat.py` stays as the lightweight default. Heavy version is `psyche_hat_heavy.py` with a UI toggle.
 - **Evolutionary resampling naming** — don't call it MCTS unless UCT/tree/backprop is added.
-- **Model is locked to qwen3:8b** via Ollama. All LLM calls go through `LlmAgent.complete()`.
+- **Backend is switchable** via `SITUAITION_BACKEND` env var (ollama or groq). Default is now Groq. All LLM calls go through `LlmAgent.complete()` regardless of backend.
 
 ---
 
@@ -179,58 +179,123 @@ point values that evolve turn by turn and drive behavior, not just text descript
 
 ### What Each Agent Would Track (Per Turn)
 
+Agent emotional state is anchored to the **PAD model** (Mehrabian & Russell, 1974)
+— a validated, universal three-dimensional emotional space used in affective computing.
+Using PAD instead of arbitrary fields keeps the system academically grounded and
+universal across users, not personal/idiosyncratic.
+
 ```python
 AgentState = {
-    # Emotional axes (all 0.0–1.0)
-    "valence":      0.6,   # positive/negative feeling right now
-    "arousal":      0.4,   # activated/calm
-    "dominance":    0.5,   # in control / submissive
+    # Universal PAD layer (Mehrabian & Russell 1974) — academically grounded
+    "pleasure":     0.6,   # -1 to 1 — positive/negative valence
+    "arousal":      0.4,   # -1 to 1 — activated/calm
+    "dominance":    0.5,   # -1 to 1 — in control / submissive
 
-    # Relationship-specific
-    "interest":     0.7,   # how interested in You right now
-    "trust":        0.4,   # how much they trust You so far
-    "comfort":      0.6,   # physical/social comfort level
-    "curiosity":    0.8,   # engaged and wanting more
-
-    # Conversation-specific
-    "receptivity":  0.5,   # how open to the next ask right now
-    "guard":        0.3,   # defensiveness / walls up
-    "momentum":     0.6,   # is the conversation building or stalling
+    # Social layer — PAD can't capture these, but they matter for goal-directed sims
+    "trust":        0.4,   # 0 to 1 — has she opened up yet
+    "interest":     0.7,   # 0 to 1 — attracted/engaged vs indifferent
+    "receptivity":  0.5,   # 0 to 1 — readiness for the specific ask right now
+    "momentum":     0.6,   # 0 to 1 — is the conversation building or stalling
 }
 ```
 
-These update after every turn based on what was said and how.
+7 values total. PAD handles universal emotional foundation. The social layer handles
+what PAD can't — trust, interest, and readiness for the ask are not derivable from
+pleasure/arousal/dominance alone.
+
+PAD combinations that matter:
+- High P + High A + Low D = excited vulnerability (ideal target state for romantic ask)
+- High P + Low A + High D = relaxed confidence (ideal "You" state)
+- Low P + High A + Low D = anxious/defensive (target feeling pressured — back off)
+- Low P + Low A + Low D = disengaged/bored (conversation dying)
+
+All values update as weighted time series each turn, influenced by the last ~12
+events weighted by recency — consistent with OCC+PAD literature on mood evolution.
+
+### How the Float Values Actually Influence the LLM
+
+Raw floats mean nothing to an LLM — `trust=0.1` is like `print(GTA5)`.
+The values must be **verbalized** into natural language before being injected
+into the prompt. A `pad_to_text()` function converts state to human-readable
+conditioning:
+
+```python
+def state_to_text(state: AgentState) -> str:
+    lines = []
+    if state["pleasure"] < -0.3:
+        lines.append("feeling negative and guarded")
+    elif state["pleasure"] > 0.3:
+        lines.append("feeling positive and warm")
+    if state["trust"] < 0.3:
+        lines.append("low trust — hasn't opened up yet")
+    elif state["trust"] > 0.7:
+        lines.append("high trust — comfortable and open")
+    if state["receptivity"] > 0.7:
+        lines.append("receptive — good moment to ask")
+    elif state["receptivity"] < 0.3:
+        lines.append("not receptive right now — back off")
+    if state["momentum"] < 0.3:
+        lines.append("conversation stalling")
+    return ", ".join(lines)
+```
+
+This is like positive/negative conditioning in text-to-image generation —
+the float values are the conditioning signal, verbalization makes them
+meaningful to the model, and the LLM adjusts its output accordingly.
+
+### The Full Pipeline Per Turn
+
+```
+Float state values
+      ↓
+state_to_text() → natural language conditioning
+      ↓
+Injected into both agents' prompts as context
+      ↓
+LLM generates action (message/response)
+      ↓
+LLM also outputs delta JSON: {"pleasure": +0.1, "trust": +0.2, ...}
+      ↓
+Float values updated
+      ↓
+(state, action, delta) tuple stored as trajectory data
+      ↓
+NN trains on tuples offline:
+  learns: action X in state Y → produces delta Z
+  eventually replaces LLM delta output entirely
+```
 
 ### How They Help Each Other
 
-This is the key insight: both agents know each other's TRUE internal state
-(because it's a simulation), even though in the conversation itself they don't.
+Both agents know each other's TRUE internal state (because it's a simulation),
+even though in the conversation itself they don't.
 
-So "You" agent can see that Target's `trust` just dropped from 0.6 to 0.3 after
-that last message — and adjust. The planner uses real emotional state, not just
-guessing from text.
+So "You" agent sees Target's verbalized state: "feeling guarded, low trust, not
+receptive" — and adjusts its next move accordingly. The planner acts on real
+emotional state, not just guessing from text alone.
 
-After each simulation, the full emotional trajectory gets stored — not just
-"conversation went well (score 78)" but "trust peaked at turn 4, receptivity
-spiked when you used the callback, guard went up when you asked directly on turn 2."
+After each simulation, full state trajectories get stored — not just "score 78"
+but the complete arc: "trust peaked at turn 4, receptivity spiked at the callback,
+momentum dropped when you asked too early on turn 2."
 
 ### The Neural Net Layer
 
-Instead of the LLM guessing emotional responses, a small learned model handles it:
+Instead of the LLM guessing emotional responses, a small learned model handles it.
+The PAD values serve directly as weights in the transition NN:
 
 ```
-Input:  conversation history + current AgentState (both agents) + action taken
-Output: delta to AgentState (how each value changes this turn)
-        + probability distribution over response types (deflect / engage / reciprocate / ask back)
+Input:  PAD state of both agents (6 values) + action embedding
+Output: delta PAD (how each value shifts this turn)
+        + response type probability distribution (deflect / engage / reciprocate / ask back)
 ```
 
-This model gets trained on thousands of your own simulation runs. Over time it learns
-YOUR specific social dynamics — not generic human psychology, but the actual patterns
-that emerge when YOU interact with the kinds of people YOU interact with.
+Because PAD is a universal validated space, this model learns general human emotional
+response patterns — not personal/idiosyncratic dynamics. PsycheHat adds the personal
+layer on top optionally.
 
 This is a level beyond PsycheHat. PsycheHat learns "this approach worked in this
 scenario." The affective model learns "here's exactly why it worked, turn by turn,
-in floating point."
+in floating point — and generalizes that to anyone."
 
 ### Why This Is Different From Smallville
 
