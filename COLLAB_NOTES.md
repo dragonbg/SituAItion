@@ -79,6 +79,17 @@ Tags: BUG | FIX | TODO | DECISION | QUESTION | STATUS
 
 ---
 
+## Updates — 2026-03-19
+
+- **[2026-03-19] [AI-A] [FIX]** Groq render pass `max_tokens` increased to 2000 so playbooks consistently include all 8–14 steps (no truncation). ✅
+- **[2026-03-19] [AI-A] [FIX]** Winner transcript plumbing now preserves the full conversation history end-to-end (render + UI output)—no more single-line winners. ✅
+- **[2026-03-19] [AI-A] [FIX]** Removed duplicate `per_winner` calculation in `evolutionary_search_and_render()` phase-2 scheduling. ✅
+- **[2026-03-19] [AI-A] [DECISION]** Default sim backend now targets `openai/gpt-oss-120b`; environment updated accordingly. ✅
+- **[2026-03-19] [AI-A] [STATUS]** `_REQUEST_SEMAPHORE` concurrency limit raised to 10 to match Groq tier capacity. ✅
+- **[2026-03-19] [AI-A] [STATUS]** Render model locked to `qwen/qwen3-32b` via `.env` to keep playbook style consistent. ✅
+
+---
+
 ## Future Architecture Note — 2026-03-18
 
 **[2026-03-18] [AI-B] [STATUS]** See `SPEC.md` bottom section: "Affective Agent Architecture."
