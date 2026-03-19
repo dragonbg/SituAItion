@@ -261,6 +261,16 @@ class GenerativeAgent:
         self.target_traits = target_traits
         self.psyche_hat    = psyche_hat
         self.llm           = llm or LlmAgent()
+        base_cfg = self.llm.llm
+        self._state_delta_llm = LlmAgent(
+            llm=LlmConfig(
+                model=base_cfg.model,
+                temperature=base_cfg.temperature,
+                num_predict=80,
+                timeout_s=base_cfg.timeout_s,
+                keep_alive=base_cfg.keep_alive,
+            )
+        )
         self.memory_stream: list[Memory] = []
         self.reflections:   list[str]   = []
         self.clock:         float       = 0.0
@@ -375,27 +385,25 @@ class GenerativeAgent:
         partner_state_text: str | None,
         environment: str = "",
     ) -> None:
+        msg_snippet = " ".join((latest_message or "").split())[:200]
+        partner_line = (partner_state_text or "Unknown").strip()
+        env_line = environment.strip() or "Unknown"
         prompt = (
-            "You are an affective-computing analyzer. Given the latest exchange, "
-            "return ONLY JSON with keys: "
-            + ", ".join(self._STATE_FIELDS)
-            + ". Each value must be a float between -0.3 and +0.3 indicating the delta "
-            "to apply to the agent's current emotional state (positive increases, negative decreases)."
+            f"State: {self.state.debug_summary()}\n"
+            f"Partner: {partner_line}\n"
+            f"Env: {env_line}\n"
+            f"Message: {msg_snippet or '(empty)'}\n"
+            "Output JSON only, keys: pleasure arousal dominance trust interest receptivity momentum, values -0.3 to 0.3"
         )
-        context = (
-            f"\nCurrent scenario: {self.scenario or 'Unknown'}\n"
-            f"Situation focus: {situation}\n"
-            f"Internal state before update: {self.state.to_text()}\n"
-            f"Partner visible state: {partner_state_text or 'Unknown'}\n"
-            f"Observed environment: {environment.strip() or 'Unknown'}\n"
-            f"Your latest message: {latest_message.strip() or '(empty)'}\n"
-            "Remember: stay within [-0.3, +0.3] per field."
-        )
-        raw = self.llm.complete(prompt + context, json_mode=True)
-        delta = self._parse_state_delta(raw)
-        if delta is None:
-            fallback_raw = self.llm.complete(prompt + context, json_mode=False)
-            delta = self._parse_state_delta(fallback_raw)
+        delta = None
+        try:
+            raw = self._state_delta_llm.complete(prompt, json_mode=True)
+            delta = self._parse_state_delta(raw)
+            if delta is None:
+                fallback_raw = self._state_delta_llm.complete(prompt, json_mode=False)
+                delta = self._parse_state_delta(fallback_raw)
+        except Exception:
+            return
         if delta:
             self.state.apply_delta(delta)
 
