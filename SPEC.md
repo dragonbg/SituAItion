@@ -9,9 +9,34 @@ Read this before touching any code.
 
 SituAItion is a **personal multiverse social strategy simulator**.
 
-You give it a real-life situation and a goal — e.g. "I'm at a bar with a coworker I like, I want to get her Instagram" — and it simulates hundreds of parallel versions of that conversation, evolves the best ones, and returns a single hyper-granular playbook: exact timing, body language, words to say, how to read the response, what to do if they deflect.
+You describe any real-life situation and a goal. The system simulates hundreds of parallel versions of how it could play out, evolves the best ones, and returns a single hyper-granular playbook: exact timing, body language, words, how to read signals, what to do if things go sideways.
 
-The core idea: instead of generic advice ("be confident"), it runs the actual conversation thousands of times in simulation and finds the weird-but-brilliant sequence that actually works for YOUR specific situation and YOUR specific traits.
+The core idea: instead of generic advice ("be confident"), it runs the actual situation thousands of times in simulation and finds the weird-but-brilliant sequence that actually works — including non-obvious emergent tactics that no human would explicitly think of.
+
+### What "situation" actually means
+
+NOT just romantic scenarios. The input is any interpersonal situation with a goal:
+
+- "I'm outside a café. She's reading alone, earbuds in, body language closed. 3 other people nearby. From what I can see she likes coffee and probably reads fiction. Goal: start a conversation without being weird."
+- "I'm in a meeting. My manager keeps shooting down my ideas before I finish. Goal: get my proposal actually heard."
+- "My friend group is planning something I don't want to do. Goal: redirect without being the difficult one."
+- "I'm negotiating salary. They just gave me a number. Goal: counter without damaging the relationship."
+
+The system treats ALL of these the same way: observe the state, model the agents involved, simulate thousands of paths, evolve the winners, output the playbook.
+
+### What "novel tactics" means
+
+The evolutionary search doesn't just generate scripted dialogue. Over thousands of simulations it should surface emergent non-obvious micro-moves — things like:
+
+- A well-timed pause before responding that shifts perceived confidence
+- Looking away at a specific moment to reduce pressure
+- Referencing something environmental rather than the person directly
+- A specific laugh cadence that signals you're not trying too hard
+
+These are the moves that don't appear in any social advice article because they're too subtle and context-specific. They only emerge from actually simulating the interaction at scale.
+
+**Currently:** the LLM converges on safe scripted social dialogue. The evolutionary search finds "best script" not "novel emergent tactic."
+**Future (PAD + NN):** the transition model learns which micro-state changes produce which outcomes, enabling genuinely non-obvious recommendations.
 
 ---
 
@@ -118,11 +143,14 @@ src/
 - Gradio UI with all three modes + sliders ✅
 - Groq backend support via `SITUAITION_BACKEND=groq` ✅
 - Benchmark logged: GA-off 62s, GA-on 104s (32→31 sims, 4 turns on Groq) ✅
+- Render pass token budget bumped to 1000 so micro-tactics stop truncating ✅
+- Judge incentivizes non-generic tactics via novelty reward ✅
 
 ## What's Not Done Yet
 
-- Heavy PsycheHat (`psyche_hat_heavy.py`) — ready to merge
-- `use_generative_agents` speed benchmark — needs timing test logged in COLLAB_NOTES
+- Situation input redesign — UI currently assumes conversation; should accept observed state (environment, body language, inferred interests)
+- PAD + AgentState implementation — see Future Vision section
+- Transition NN training — needs trajectory data first
 - TASKS.md — formal task backlog doesn't exist yet
 
 ---

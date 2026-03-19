@@ -389,6 +389,7 @@ def judge_conversation(
 Judge this conversation for:
 - Likelihood of a positive outcome toward the goal
 - Respect/consent/honesty/low-pressure (must be high)
+- Bonus points if the approach is unexpected, non-generic, or uses environmental/context clues creatively (not just polite script)
 
 If there is pressure, deception, or ignoring a "no", score should drop sharply.
 Output ONLY JSON with keys: score (int 0-100), notes (string).
@@ -433,6 +434,7 @@ Conversation (recent):
 
     text_blob = " ".join(history[-12:])
     score = max(0, min(100, int(score) - _red_flag_penalty(text_blob)))
+    score = max(0, min(100, score + _novelty_bonus(history)))
     return score, notes or (raw[:250] if raw else "")
 
 
@@ -466,6 +468,54 @@ def _heuristic_reward(goal: str, history: list[str]) -> int:
         reward -= 10
 
     return max(-25, min(35, reward))
+
+
+def _novelty_bonus(history: list[str]) -> int:
+    """Lightweight novelty heuristic to reward non-generic approaches."""
+    text = " ".join(history[-10:]).lower()
+    bonus = 0
+
+    env_words = (
+        "rooftop",
+        "cafe",
+        "bar",
+        "window",
+        "playlist",
+        "lighting",
+        "weather",
+        "crowd",
+        "bartender",
+        "art",
+        "book",
+        "coffee",
+        "earbuds",
+        "balcony",
+    )
+    if any(w in text for w in env_words):
+        bonus += 3
+
+    playful_signals = (
+        "callback",
+        "inside joke",
+        "plot twist",
+        "curveball",
+        "random dare",
+        "coin flip",
+        "bet you",
+        "tease",
+        "disqualify",
+    )
+    if any(sig in text for sig in playful_signals):
+        bonus += 3
+
+    if "(pause" in text or "[pause" in text or "stage" in text:
+        bonus += 2
+
+    unique_messages = {line.strip().lower() for line in history if line.startswith("You:")}
+    if len(unique_messages) >= 3:
+        bonus += 1
+
+    return min(8, bonus)
 
 
 def beam_search_simulation(
@@ -733,7 +783,8 @@ def render_micro_tactics(
     hyper-granular micro-tactics (timing/body language/exact words), without
     contaminating the search with long outputs.
     """
-    agent = llm or LlmAgent(llm=LlmConfig(temperature=0.8, num_predict=520))
+    agent = llm or LlmAgent(llm=LlmConfig(temperature=0.8, num_predict=1000))
+
     convo = "\n".join(message_history[-16:]) if message_history else "(start)"
     prompt = f"""
 You are converting a successful conversation outline into a hyper-granular "playbook".
