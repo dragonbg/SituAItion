@@ -340,12 +340,25 @@ class GenerativeAgent:
         except Exception:
             return ""
 
-    def react_message(self, situation: str, approach: str = "") -> str:
+    def react_message(
+        self,
+        situation: str,
+        approach: str = "",
+        *,
+        partner_state_text: str | None = None,
+        partner_receptivity: float | None = None,
+    ) -> str:
         """Short 1-2 sentence output for search phase."""
         plan_line = self.plan(situation)
+        partner_line = ""
+        if partner_state_text:
+            partner_line = f"Target's current state: {partner_state_text.strip()}\n"
+            if partner_receptivity is not None and partner_receptivity < 0.4:
+                partner_line += "Target is not ready for a direct ask yet — build more rapport first.\n"
         resp = self.llm.complete(
             f"You are {self.name} ({self.traits}). Goal: {self.goal}.\n"
             f"Internal state: {self.state.to_text()}\n"
+            f"{partner_line}"
             f"Plan: {plan_line}\nMemory: {self.retrieve()}\n"
             f"Approach: {approach}{self._hat_line()}\nSituation: {situation}\n\n"
             f"Write your next message in 1-2 natural sentences. Human and specific."

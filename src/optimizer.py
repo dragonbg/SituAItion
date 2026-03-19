@@ -835,7 +835,14 @@ Conversation so far:
         _p_local((t + 0.05) / max(1, int(turns)), f"Sim turn {t+1}/{turns} — drafting your message...")
         if you_agent is not None:
             situation = f"Turn {t+1}. Scenario: {scenario}"
-            you_msg = you_agent.react_message(situation=situation, approach=approach)
+            partner_text = target_agent.state.to_text() if target_agent is not None else None
+            partner_receptivity = target_agent.state.receptivity if target_agent is not None else None
+            you_msg = you_agent.react_message(
+                situation=situation,
+                approach=approach,
+                partner_state_text=partner_text,
+                partner_receptivity=partner_receptivity,
+            )
         else:
             you_msg = write_next_message()
         history.append(f"You: {you_msg}")
