@@ -936,7 +936,7 @@ def render_micro_tactics(
     """
     render_model = os.getenv("SITUAITION_RENDER_MODEL") or os.getenv("SITUAITION_MODEL", "qwen3:8b")
     agent = llm or LlmAgent(
-        llm=LlmConfig(model=render_model, temperature=0.8, max_tokens=2000)
+        llm=LlmConfig(model=render_model, temperature=0.8, num_predict=2000)
     )
 
     convo = "\n".join(message_history) if message_history else "(start)"
