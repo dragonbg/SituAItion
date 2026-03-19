@@ -145,6 +145,7 @@ src/
 - Benchmark logged: GA-off 62s, GA-on 104s (32→31 sims, 4 turns on Groq) ✅
 - Render pass token budget bumped to 1000 so micro-tactics stop truncating ✅
 - Judge incentivizes non-generic tactics via novelty reward ✅
+- PAD AgentState foundation (Steps 1-3: state tracking + cross-agent visibility) ✅
 
 ## What's Not Done Yet
 
@@ -340,15 +341,36 @@ This adds:
 
 ### Implementation Path (When Ready)
 
-Do not implement this yet. Understand it first, then propose an approach in COLLAB_NOTES.
+Steps 1-2 are done. Steps 3-6 are next.
 
-High-level steps when the time comes:
-1. Add `AgentState` dataclass with float fields to `agent.py`
-2. After each `react_message()` call, run a state update step
-3. Pass both agents' current states into each other's prompt context
+1. ✅ Add `AgentState` dataclass with float fields to `agent.py` — done by AI-B
+2. ✅ After each `react_message()` call, run a state update step — done by AI-B
+3. ✅ Pass both agents' current states into each other's prompt context — "You" now sees Target's verbalized PAD state and gets a receptivity guardrail
 4. Store full state trajectories alongside winning conversations in PsycheHat
 5. Train a small transition MLP on trajectories (separate from the success MLP)
 6. Eventually: replace LLM-based target simulation with the learned transition model
+
+### Known Limitation: State Update Heuristic (fix before NN training)
+
+Current implementation uses `update_from_text()` — a keyword heuristic that guesses
+PAD delta values from words in the LLM response. This is intentionally lightweight
+for the foundation but will produce noisy/wrong state updates frequently.
+
+Example of the problem: if the LLM response contains "I feel nervous" the heuristic
+might correctly drop pleasure, but if it says "I laughed nervously" it might miss
+the social signal entirely.
+
+**Before training the NN on trajectory data, this must be replaced with:**
+```
+LLM outputs delta JSON explicitly:
+{"pleasure": -0.1, "arousal": +0.2, "dominance": -0.1, "trust": +0.0, ...}
+```
+Add a structured output step after each `react_message()` call where the LLM
+is asked: "Given this exchange, how did Target's emotional state shift? Output
+only JSON with keys: pleasure, arousal, dominance, trust, interest, receptivity, momentum."
+
+Training the NN on heuristic-generated trajectories would teach it noise, not signal.
+Fix this before Step 5.
 
 ### Note
 
