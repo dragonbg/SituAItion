@@ -4,14 +4,17 @@ from __future__ import annotations
 Heavy PsycheHat (optional):
 - ChromaDB persistent vector store (RAG over past wins)
 - Torch MLP that trains on wins and persists weights
+- Triple-score memory retrieval + reflection (Generative Agents inspired)
 
 This module is intentionally optional because it adds heavyweight deps.
 If imports fail, instantiating `PsycheHatHeavy()` raises a clear error.
 """
 
+import json
 import os
 import random
 import time
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -23,6 +26,8 @@ try:
     import chromadb  # type: ignore
 except Exception as e:  # pragma: no cover
     _IMPORT_ERROR = e
+
+from src.agent import LlmAgent, LlmConfig
 
 
 WEIGHTS_PATH = "./psyche_memory/mlp_weights.pt"
@@ -39,6 +44,15 @@ APPROACHES = [
     "callback to earlier moment",
     "light physical presence",
 ]
+
+
+@dataclass
+class MemoryObject:
+    desc: str
+    created: int
+    last_accessed: int
+    importance: int
+    embedding: "np.ndarray"
 
 
 class PsycheHatHeavy:
@@ -71,12 +85,105 @@ class PsycheHatHeavy:
 
         self.memory_size: int = self.collection.count()
         self.ab_stats: dict[str, list[int]] = {"with_hat": [], "without_hat": []}
+        self.memory_stream: list[MemoryObject] = []
+        self._sim_tick = 0
+        self._importance_since_reflect = 0
+        self._reflect_llm = LlmAgent(
+            llm=LlmConfig(temperature=0.35, num_predict=220)
+        )
+        self._mem_since_reflect = 0
 
     def embed(self, text: str) -> "np.ndarray":
         from ollama import embeddings
 
         resp = embeddings(model="nomic-embed-text", prompt=text)
         return np.array(resp["embedding"], dtype=np.float32)
+
+    def _cosine(self, a: "np.ndarray", b: "np.ndarray") -> float:
+        denom = (np.linalg.norm(a) * np.linalg.norm(b)) or 1e-8
+        return float(np.dot(a, b) / denom)
+
+    def _add_memory(self, desc: str, importance: int, emb: "np.ndarray") -> None:
+        importance = max(1, int(importance))
+        vec = emb.astype(np.float32)
+        norm = np.linalg.norm(vec)
+        if norm:
+            vec = vec / norm
+        mem = MemoryObject(
+            desc=desc.strip(),
+            created=self._sim_tick,
+            last_accessed=self._sim_tick,
+            importance=importance,
+            embedding=vec,
+        )
+        self.memory_stream.append(mem)
+        self._sim_tick += 1
+        self._importance_since_reflect += importance
+        self._mem_since_reflect += 1
+        self._maybe_reflect()
+
+    def _retrieve_memories(self, query: str, k: int = 8) -> list[MemoryObject]:
+        if not self.memory_stream:
+            return []
+        q_emb = self.embed(query)
+        norm = np.linalg.norm(q_emb)
+        if norm:
+            q_emb = q_emb / norm
+        scored: list[tuple[float, MemoryObject]] = []
+        for mem in self.memory_stream:
+            recency_delta = max(0, self._sim_tick - mem.last_accessed)
+            recency = 0.995 ** recency_delta
+            relevance = max(0.0, self._cosine(q_emb, mem.embedding))
+            score = recency * max(1, mem.importance) * relevance
+            scored.append((score, mem))
+        top_pairs = sorted(scored, key=lambda x: x[0], reverse=True)[:k]
+        top = [mem for score, mem in top_pairs if score > 0]
+        for mem in top:
+            mem.last_accessed = self._sim_tick
+        return top
+
+    def _maybe_reflect(self) -> None:
+        if not self.memory_stream:
+            return
+        if self._importance_since_reflect < 150 and self._mem_since_reflect < 32:
+            return
+        self._importance_since_reflect = 0
+        self._mem_since_reflect = 0
+        self._run_reflection()
+
+    def _run_reflection(self) -> None:
+        top = sorted(self.memory_stream, key=lambda m: m.importance, reverse=True)[:100]
+        if not top:
+            return
+        context = "\n".join(f"- {m.desc}" for m in top)
+        prompt = (
+            "You synthesize social interaction memories. Given the entries below, "
+            "list 3 salient high-level questions we can answer. Return JSON array of strings.\n"
+            f"Memories:\n{context}\n"
+        )
+        raw = self._reflect_llm.complete(prompt, json_mode=True)
+        try:
+            questions = json.loads(raw)
+        except Exception:
+            questions = []
+        if not isinstance(questions, list):
+            questions = []
+        questions = [str(q).strip() for q in questions if str(q).strip()]
+        for q in questions[:3]:
+            relevant = self._retrieve_memories(q, k=5)
+            if not relevant:
+                continue
+            refs = "\n".join(f"- {m.desc}" for m in relevant)
+            insight_prompt = (
+                "Given the following question and supporting memories, craft one high-level insight "
+                "(2 sentences max) citing the specific patterns observed.\n"
+                f"Question: {q}\nMemories:\n{refs}\nInsight:"
+            )
+            insight = self._reflect_llm.complete(insight_prompt).strip()
+            if not insight:
+                continue
+            emb = self.embed(insight)
+            self._add_memory(f"Reflection: {insight}", importance=9, emb=emb)
 
     def store_success(
         self,
@@ -131,6 +238,12 @@ class PsycheHatHeavy:
         self.opt.step()
         torch.save(self.mlp.state_dict(), WEIGHTS_PATH)
 
+        memory_desc = (
+            f"Winner ({approach}) score {score}/100 — Scenario='{scenario[:80]}' Target='{target_traits[:60]}'"
+        )
+        importance = max(1, round(int(score) / 10))
+        self._add_memory(memory_desc, importance=importance, emb=emb)
+
     def get_guidance(
         self,
         *,
@@ -148,10 +261,13 @@ class PsycheHatHeavy:
         n = min(3, max(1, self.memory_size))
         results = self.collection.query(query_embeddings=[q_emb.tolist()], n_results=n)
         metas = (results.get("metadatas") or [[]])[0]
+        mem_hits = self._retrieve_memories(query, k=3)
 
         x = torch.tensor(q_emb).unsqueeze(0)
         with torch.no_grad():
             predicted = float(self.mlp(x).item() * 100)
+
+        reflection_tip = mem_hits[0].desc if mem_hits else ""
 
         if metas:
             best = max(metas, key=lambda m: m.get("score", 0))
@@ -165,10 +281,14 @@ class PsycheHatHeavy:
             approach = random.choice(APPROACHES)
             tip = f"PsycheHatHeavy [cold start]: try '{approach}' as opener."
 
+        if reflection_tip:
+            tip += f" Memory: {reflection_tip}"
+
         return {
             "recommended_approach": approach,
             "predicted_success": round(predicted, 1),
             "past_wins": metas,
             "tip": tip,
+            "memory_hits": [m.desc for m in mem_hits],
         }
 
