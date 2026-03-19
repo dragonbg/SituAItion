@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import httpx
+
 
 # ─────────────────────────────────────────────────────────────────
 #  Backend selection
@@ -29,7 +31,7 @@ class LlmConfig:
     model:       str   = os.getenv("SITUAITION_MODEL", "qwen3:8b")
     temperature: float = 0.85
     num_predict: int   = 450
-    timeout_s:   float = 90.0
+    timeout_s:   float = 180.0
     keep_alive:  str   = "10m"   # Ollama only
 
 
@@ -99,8 +101,22 @@ class LlmAgent:
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        resp = client.chat.completions.create(**kwargs)
-        return (resp.choices[0].message.content or "").strip()
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            try:
+                resp = client.chat.completions.create(timeout=self.llm.timeout_s, **kwargs)
+                return (resp.choices[0].message.content or "").strip()
+            except (httpx.ReadTimeout, TimeoutError) as exc:
+                if attempt + 1 >= max_attempts:
+                    raise
+                time.sleep(1.0)
+                continue
+            except Exception as exc:
+                if "ReadTimeout" in str(exc) and attempt + 1 < max_attempts:
+                    time.sleep(1.0)
+                    continue
+                raise
+        raise RuntimeError("Groq completion failed after retries")
 
     # ── Unified interface ─────────────────────────────────────────
 

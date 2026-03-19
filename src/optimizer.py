@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import random
 from dataclasses import dataclass
@@ -16,6 +17,13 @@ from tqdm import tqdm
 
 from src.agent import LlmAgent, LlmConfig
 from src.psyche_hat import PsycheHat
+
+LOG_PROGRESS = os.getenv("SITUAITION_LOG_PROGRESS", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _log_progress(msg: str) -> None:
+    if LOG_PROGRESS:
+        print(f"[optimizer] {msg}", flush=True)
 
 
 @dataclass(frozen=True)

@@ -137,10 +137,11 @@ def gradio_ui(
         return (
             "Couldn't run.\n\n"
             f"Error: {type(e).__name__}: {e}\n\n"
-            "If you're using Ollama as the backend:\n"
-            "- Install the Python package: pip install ollama\n"
-            "- Start Ollama\n"
-            "- Pull a model: ollama pull qwen3:8b\n"
+            "If you're using Groq as the backend:\n"
+            "- Ensure GROQ_API_KEY is set in .env or your shell\n"
+            "- Verify the model exists (e.g. llama-3.3-70b-versatile)\n"
+            "- Check https://console.groq.com for quota or service errors\n"
+            "- If the issue persists, rerun with fewer concurrent sims or retry later\n"
         )
 
 iface = gr.Interface(
