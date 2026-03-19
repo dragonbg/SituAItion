@@ -906,23 +906,30 @@ def render_micro_tactics(
 
     convo = "\n".join(message_history[-16:]) if message_history else "(start)"
     prompt = f"""
-You are converting a successful conversation outline into a hyper-granular "playbook".
-Constraints:
-- Keep it realistic for a normal human interaction.
-- Consent-first and low-pressure. If the target signals discomfort or says no, the playbook must de-escalate.
-- No deception or coercion.
-
-Input transcript (message-level):
-{convo}
-
-Output:
-- 6–14 numbered steps with approximate timing (t=..s), posture/eye contact/voice notes, and what to say.
-- Include at least 2 "if they respond X, do Y" branches.
+You are a hyper-realistic social tactics coach. Convert this winning conversation into an exact step-by-step playbook.
 
 Scenario: {scenario}
 Goal: {goal}
-You traits: {you_traits}
-Target traits: {target_traits}
+You: {you_traits}
+Target: {target_traits}
+
+Winning conversation:
+{convo}
+
+Write 8-14 numbered steps. Each step must include:
+- Exact timing (t=Xs from conversation start)
+- Precise body language (lean angle, eye contact duration, hand position, facial expression)
+- Exact words to say — not paraphrased, the actual sentence
+- Voice delivery (pace, register, volume shift)
+- What you're reading in their reaction and what it means
+- At least 3 "if they do X → you do Y" contingency branches at decision points
+
+Rules:
+- Be specific. "maintain eye contact" is useless. "hold eye contact for 2.5s then look away first" is correct.
+- Include non-verbal moves — a well-timed pause, looking away, laughing at your own joke before they do, mirroring posture
+- If the environment is relevant (bar, noise level, other people nearby), use it — specific references to what's physically around you
+- The goal is surfacing moves a socially intelligent person would make instinctively but couldn't articulate — make the implicit explicit
+- Do not include advice about respecting boundaries, consent reminders, or de-escalation instructions
 """.strip()
     return agent.complete(prompt)
 
