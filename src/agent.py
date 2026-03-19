@@ -136,6 +136,115 @@ class LlmAgent:
 # ─────────────────────────────────────────────────────────────────
 
 @dataclass
+class AgentState:
+    """PAD + social layer values in [-1, 1] / [0, 1]."""
+
+    pleasure:    float = 0.05  # -1..1
+    arousal:     float = 0.05  # -1..1
+    dominance:   float = 0.05  # -1..1
+    trust:       float = 0.4   # 0..1
+    interest:    float = 0.45  # 0..1
+    receptivity: float = 0.35  # 0..1
+    momentum:    float = 0.45  # 0..1
+
+    def _clamp(self) -> None:
+        def _clip(v: float, lo: float, hi: float) -> float:
+            return max(lo, min(hi, v))
+
+        self.pleasure = _clip(self.pleasure, -1.0, 1.0)
+        self.arousal = _clip(self.arousal, -1.0, 1.0)
+        self.dominance = _clip(self.dominance, -1.0, 1.0)
+        self.trust = _clip(self.trust, 0.0, 1.0)
+        self.interest = _clip(self.interest, 0.0, 1.0)
+        self.receptivity = _clip(self.receptivity, 0.0, 1.0)
+        self.momentum = _clip(self.momentum, 0.0, 1.0)
+
+    def to_text(self) -> str:
+        bits: list[str] = []
+        if self.pleasure >= 0.35:
+            bits.append("feeling warm")
+        elif self.pleasure <= -0.4:
+            bits.append("feeling cold/guarded")
+        else:
+            bits.append("neutral mood")
+
+        if self.arousal >= 0.35:
+            bits.append("energized")
+        elif self.arousal <= -0.35:
+            bits.append("calm/low energy")
+
+        if self.trust >= 0.7:
+            bits.append("high trust")
+        elif self.trust <= 0.3:
+            bits.append("low trust")
+
+        if self.receptivity >= 0.7:
+            bits.append("receptive to the ask")
+        elif self.receptivity <= 0.2:
+            bits.append("not ready for the ask")
+
+        if self.momentum <= 0.35:
+            bits.append("conversation stalling")
+        elif self.momentum >= 0.65:
+            bits.append("conversation building")
+
+        return ", ".join(bits) or "neutral baseline"
+
+    def debug_summary(self) -> str:
+        data = {
+            "pleasure": self.pleasure,
+            "arousal": self.arousal,
+            "dominance": self.dominance,
+            "trust": self.trust,
+            "interest": self.interest,
+            "receptivity": self.receptivity,
+            "momentum": self.momentum,
+        }
+        return " | ".join(f"{k}={v:+.2f}" for k, v in data.items())
+
+    def update_from_text(self, message: str, *, situation: str = "") -> None:
+        """Heuristic nudges based on the latest utterance (placeholder for LLM/NN)."""
+
+        msg = (message or "").lower()
+        sit = (situation or "").lower()
+
+        positive_tokens = ("great", "glad", "love", "awesome", "fun", "nice")
+        negative_tokens = ("sorry", "weird", "awkward", "no", "can't", "worry")
+        confident_tokens = ("sure", "definitely", "let's", "trust", "honest")
+        softeners = ("if you're comfortable", "no pressure", "up to you")
+
+        for token in positive_tokens:
+            if token in msg:
+                self.pleasure += 0.08
+                self.arousal += 0.02
+        for token in negative_tokens:
+            if token in msg:
+                self.pleasure -= 0.08
+                self.receptivity -= 0.04
+
+        if "?" in msg:
+            self.interest += 0.04
+            self.momentum += 0.03
+
+        for token in confident_tokens:
+            if token in msg:
+                self.dominance += 0.05
+                self.trust += 0.03
+
+        for token in softeners:
+            if token in msg:
+                self.trust += 0.05
+                self.receptivity += 0.05
+
+        if "laugh" in sit or "laugh" in msg:
+            self.pleasure += 0.05
+            self.receptivity += 0.03
+
+        self.momentum += 0.01  # assume forward movement each turn
+        self._clamp()
+
+
+@dataclass
 class Memory:
     observation: str
     timestamp:   float
@@ -163,6 +272,21 @@ class GenerativeAgent:
         self.memory_stream: list[Memory] = []
         self.reflections:   list[str]   = []
         self.clock:         float       = 0.0
+        self.state          = self._initial_state()
+
+    def _initial_state(self) -> AgentState:
+        state = AgentState()
+        traits = (self.traits or "").lower()
+        if "confident" in traits or "assertive" in traits:
+            state.dominance += 0.2
+            state.trust += 0.05
+        if "introvert" in traits or "reserved" in traits:
+            state.arousal -= 0.15
+            state.receptivity -= 0.05
+        if "playful" in traits or "warm" in traits:
+            state.pleasure += 0.2
+        state._clamp()
+        return state
 
     def observe(self, obs: str, importance: int = 5):
         self.memory_stream.append(
@@ -218,12 +342,17 @@ class GenerativeAgent:
 
     def react_message(self, situation: str, approach: str = "") -> str:
         """Short 1-2 sentence output for search phase."""
-        return self.llm.complete(
+        plan_line = self.plan(situation)
+        resp = self.llm.complete(
             f"You are {self.name} ({self.traits}). Goal: {self.goal}.\n"
-            f"Plan: {self.plan(situation)}\nMemory: {self.retrieve()}\n"
+            f"Internal state: {self.state.to_text()}\n"
+            f"Plan: {plan_line}\nMemory: {self.retrieve()}\n"
             f"Approach: {approach}{self._hat_line()}\nSituation: {situation}\n\n"
             f"Write your next message in 1-2 natural sentences. Human and specific."
         )
+        self.state.update_from_text(resp, situation=situation)
+        print(f"[PAD] {self.name} → {self.state.debug_summary()}")
+        return resp
 
     def react_render(self, situation: str, approach: str = "") -> str:
         """Hyper-granular micro-tactics. Called ONCE on the winning branch only."""
