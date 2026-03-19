@@ -5,7 +5,9 @@ import os
 import re
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
+import threading
 from typing import Any
 
 try:  # Optional – only present when Groq backend is installed
@@ -20,6 +22,21 @@ from src.agent import LlmAgent, LlmConfig
 from src.psyche_hat import PsycheHat
 
 LOG_PROGRESS = os.getenv("SITUAITION_LOG_PROGRESS", "").strip().lower() in {"1", "true", "yes"}
+_BACKEND = os.getenv("SITUAITION_BACKEND", "").strip().lower()
+_MAX_CONCURRENT_REQUESTS = 20 if _BACKEND == "groq" else 0
+_REQUEST_SEMAPHORE = threading.Semaphore(_MAX_CONCURRENT_REQUESTS) if _MAX_CONCURRENT_REQUESTS else None
+
+
+@contextmanager
+def _request_slot():
+    if _REQUEST_SEMAPHORE is None:
+        yield
+        return
+    _REQUEST_SEMAPHORE.acquire()
+    try:
+        yield
+    finally:
+        _REQUEST_SEMAPHORE.release()
 
 
 def _log_progress(msg: str) -> None:
@@ -963,23 +980,24 @@ def evolutionary_search_and_render(
     judge_llm = LlmAgent(llm=LlmConfig(temperature=0.15, num_predict=120))
 
     def _run_rollout_task(approach: str, seed_history: list[str] | None) -> dict[str, Any]:
-        local_proposer = LlmAgent(llm=proposer_cfg)
-        local_actor = LlmAgent(llm=actor_cfg)
-        history = _rollout_one(
-            scenario=scenario,
-            goal=goal,
-            you_traits=you_traits,
-            target_traits=target_traits,
-            turns=turns,
-            approach=approach,
-            seed_history=seed_history,
-            proposer_llm=local_proposer,
-            actor_llm=local_actor,
-            progress_cb=None,
-            progress_base=0.0,
-            progress_span=0.0,
-            use_generative_agents=use_generative_agents,
-        )
+        with _request_slot():
+            local_proposer = LlmAgent(llm=proposer_cfg)
+            local_actor = LlmAgent(llm=actor_cfg)
+            history = _rollout_one(
+                scenario=scenario,
+                goal=goal,
+                you_traits=you_traits,
+                target_traits=target_traits,
+                turns=turns,
+                approach=approach,
+                seed_history=seed_history,
+                proposer_llm=local_proposer,
+                actor_llm=local_actor,
+                progress_cb=None,
+                progress_base=0.0,
+                progress_span=0.0,
+                use_generative_agents=use_generative_agents,
+            )
         pre = 50 + _heuristic_reward(goal, history)
         return {"history": history, "score": int(pre), "approach": approach, "judge_notes": ""}
 
