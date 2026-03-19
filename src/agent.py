@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import textwrap
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import httpx
 
@@ -26,13 +27,23 @@ import httpx
 BACKEND = os.getenv("SITUAITION_BACKEND", "ollama").lower()
 
 
+def _safe_json_loads(text: str | None) -> dict[str, Any] | None:
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 @dataclass(frozen=True)
 class LlmConfig:
-    model:       str   = os.getenv("SITUAITION_MODEL", "openai/gpt-oss-120b")
-    temperature: float = 0.85
-    num_predict: int   = 450
-    timeout_s:   float = 180.0
-    keep_alive:  str   = "10m"   # Ollama only
+    model:             str   = os.getenv("SITUAITION_MODEL", "openai/gpt-oss-120b")
+    temperature:       float = 0.85
+    num_predict:       int   = 450
+    timeout_s:         float = 180.0
+    keep_alive:        str   = "10m"   # Ollama only
 
 
 class LlmAgent:
@@ -136,6 +147,17 @@ class LlmAgent:
 #  - react_render():  hyper-granular micro-tactics, winner only
 # ─────────────────────────────────────────────────────────────────
 
+STATE_FIELDS: tuple[str, ...] = (
+    "pleasure",
+    "arousal",
+    "dominance",
+    "trust",
+    "interest",
+    "receptivity",
+    "momentum",
+)
+
+
 @dataclass
 class AgentState:
     """PAD + social layer values in [-1, 1] / [0, 1]."""
@@ -159,6 +181,13 @@ class AgentState:
         self.interest = _clip(self.interest, 0.0, 1.0)
         self.receptivity = _clip(self.receptivity, 0.0, 1.0)
         self.momentum = _clip(self.momentum, 0.0, 1.0)
+
+    def apply_delta(self, delta: dict[str, float]) -> None:
+        for field in STATE_FIELDS:
+            val = delta.get(field)
+            if isinstance(val, (int, float)):
+                setattr(self, field, getattr(self, field) + float(val))
+        self._clamp()
 
     def to_text(self) -> str:
         bits: list[str] = []
@@ -203,46 +232,6 @@ class AgentState:
         }
         return " | ".join(f"{k}={v:+.2f}" for k, v in data.items())
 
-    def update_from_text(self, message: str, *, situation: str = "") -> None:
-        """Heuristic nudges based on the latest utterance (placeholder for LLM/NN)."""
-
-        msg = (message or "").lower()
-        sit = (situation or "").lower()
-
-        positive_tokens = ("great", "glad", "love", "awesome", "fun", "nice")
-        negative_tokens = ("sorry", "weird", "awkward", "no", "can't", "worry")
-        confident_tokens = ("sure", "definitely", "let's", "trust", "honest")
-        softeners = ("if you're comfortable", "no pressure", "up to you")
-
-        for token in positive_tokens:
-            if token in msg:
-                self.pleasure += 0.08
-                self.arousal += 0.02
-        for token in negative_tokens:
-            if token in msg:
-                self.pleasure -= 0.08
-                self.receptivity -= 0.04
-
-        if "?" in msg:
-            self.interest += 0.04
-            self.momentum += 0.03
-
-        for token in confident_tokens:
-            if token in msg:
-                self.dominance += 0.05
-                self.trust += 0.03
-
-        for token in softeners:
-            if token in msg:
-                self.trust += 0.05
-                self.receptivity += 0.05
-
-        if "laugh" in sit or "laugh" in msg:
-            self.pleasure += 0.05
-            self.receptivity += 0.03
-
-        self.momentum += 0.01  # assume forward movement each turn
-        self._clamp()
 
 
 @dataclass
@@ -253,6 +242,8 @@ class Memory:
 
 
 class GenerativeAgent:
+    _STATE_FIELDS: ClassVar[tuple[str, ...]] = STATE_FIELDS
+
     def __init__(
         self,
         name:          str,
@@ -348,6 +339,7 @@ class GenerativeAgent:
         *,
         partner_state_text: str | None = None,
         partner_receptivity: float | None = None,
+        environment: str = "",
     ) -> str:
         """Short 1-2 sentence output for search phase."""
         plan_line = self.plan(situation)
@@ -356,17 +348,70 @@ class GenerativeAgent:
             partner_line = f"Target's current state: {partner_state_text.strip()}\n"
             if partner_receptivity is not None and partner_receptivity < 0.4:
                 partner_line += "Target is not ready for a direct ask yet — build more rapport first.\n"
+        env_line = f"Observed environment: {environment.strip()}\n" if environment.strip() else ""
         resp = self.llm.complete(
             f"You are {self.name} ({self.traits}). Goal: {self.goal}.\n"
             f"Internal state: {self.state.to_text()}\n"
             f"{partner_line}"
+            f"{env_line}"
             f"Plan: {plan_line}\nMemory: {self.retrieve()}\n"
             f"Approach: {approach}{self._hat_line()}\nSituation: {situation}\n\n"
             f"Write your next message in 1-2 natural sentences. Human and specific."
         )
-        self.state.update_from_text(resp, situation=situation)
+        self._update_state_with_structured_delta(
+            situation=situation,
+            latest_message=resp,
+            partner_state_text=partner_state_text,
+            environment=environment,
+        )
         print(f"[PAD] {self.name} → {self.state.debug_summary()}")
         return resp
+
+    def _update_state_with_structured_delta(
+        self,
+        *,
+        situation: str,
+        latest_message: str,
+        partner_state_text: str | None,
+        environment: str = "",
+    ) -> None:
+        prompt = (
+            "You are an affective-computing analyzer. Given the latest exchange, "
+            "return ONLY JSON with keys: "
+            + ", ".join(self._STATE_FIELDS)
+            + ". Each value must be a float between -0.3 and +0.3 indicating the delta "
+            "to apply to the agent's current emotional state (positive increases, negative decreases)."
+        )
+        context = (
+            f"\nCurrent scenario: {self.scenario or 'Unknown'}\n"
+            f"Situation focus: {situation}\n"
+            f"Internal state before update: {self.state.to_text()}\n"
+            f"Partner visible state: {partner_state_text or 'Unknown'}\n"
+            f"Observed environment: {environment.strip() or 'Unknown'}\n"
+            f"Your latest message: {latest_message.strip() or '(empty)'}\n"
+            "Remember: stay within [-0.3, +0.3] per field."
+        )
+        raw = self.llm.complete(prompt + context, json_mode=True)
+        delta = self._parse_state_delta(raw)
+        if delta is None:
+            fallback_raw = self.llm.complete(prompt + context, json_mode=False)
+            delta = self._parse_state_delta(fallback_raw)
+        if delta:
+            self.state.apply_delta(delta)
+
+    def _parse_state_delta(self, raw: str | None) -> dict[str, float] | None:
+        if not raw:
+            return None
+        data = _safe_json_loads(raw)
+        if not isinstance(data, dict):
+            return None
+        out: dict[str, float] = {}
+        for field in self._STATE_FIELDS:
+            val = data.get(field)
+            if not isinstance(val, (int, float)):
+                return None
+            out[field] = float(max(-0.3, min(0.3, float(val))))
+        return out
 
     def react_render(self, situation: str, approach: str = "") -> str:
         """Hyper-granular micro-tactics. Called ONCE on the winning branch only."""

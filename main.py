@@ -1,5 +1,12 @@
-import gradio as gr
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 import os
+print("Backend:", os.getenv("SITUAITION_BACKEND"))
+print("Model:", os.getenv("SITUAITION_MODEL"))
+print("Render model:", os.getenv("SITUAITION_RENDER_MODEL"))
+
+import gradio as gr
 os.environ["OLLAMA_NUM_PARALLEL"] = "1"
 
 from src.optimizer import beam_search_simulation, evolutionary_search_and_render, monte_carlo_optimize
@@ -33,6 +40,7 @@ def gradio_ui(
     goal,
     you_traits,
     target_traits,
+    observed_environment,
     mode,
     turns,
     branch_factor,
@@ -98,6 +106,7 @@ def gradio_ui(
                 hat=hat,
                 ab_test_hat=bool(ab_test_hat),
                 use_generative_agents=bool(use_generative_agents),
+                observed_environment=observed_environment or "",
             )
             best_branch = result["best"]
             header = (
@@ -147,10 +156,30 @@ def gradio_ui(
 iface = gr.Interface(
     fn=gradio_ui,
     inputs=[
-        gr.Textbox(label="Scenario", placeholder="You and X are coworkers; you chat sometimes but aren't close yet."),
-        gr.Textbox(label="Goal", placeholder="Ask for their Instagram (with an easy out, no pressure)."),
-        gr.Textbox(label="Your traits", placeholder="Direct, friendly, a bit shy at first."),
-        gr.Textbox(label="Target traits", placeholder="Introverted; values straightforwardness and respect."),
+        gr.Textbox(
+            label="Scenario",
+            value="coworker Anna at a bar after work",
+            placeholder="You and X are coworkers; you chat sometimes but aren't close yet.",
+        ),
+        gr.Textbox(
+            label="Goal",
+            value="get her Instagram",
+            placeholder="Ask for their Instagram (with an easy out, no pressure).",
+        ),
+        gr.Textbox(
+            label="Your traits",
+            value="20M Bulgarian confident dry humor",
+            placeholder="Direct, friendly, a bit shy at first.",
+        ),
+        gr.Textbox(
+            label="Target traits",
+            value="20F introvert laughs at dry jokes",
+            placeholder="Introverted; values straightforwardness and respect.",
+        ),
+        gr.Textbox(
+            label="Observed environment (optional)",
+            placeholder="e.g. Rooftop bar, warm lighting, light lo-fi playing, coworkers nearby",
+        ),
         gr.Dropdown(
             choices=[
                 "Evolutionary (phase1/2) + render winner",
@@ -163,13 +192,13 @@ iface = gr.Interface(
         gr.Slider(minimum=1, maximum=8, value=4, step=1, label="Turns (simulation mode)"),
         gr.Slider(minimum=2, maximum=12, value=6, step=1, label="Branch factor (simulation mode)"),
         gr.Slider(minimum=2, maximum=24, value=12, step=1, label="Beam width (simulation mode)"),
-        gr.Slider(minimum=16, maximum=256, value=64, step=16, label="Evolutionary sims (evo mode)"),
-        gr.Slider(minimum=2, maximum=10, value=6, step=1, label="Turns per sim (evo mode)"),
-        gr.Slider(minimum=3, maximum=20, value=8, step=1, label="Judge top-K (quality vs speed)"),
+        gr.Slider(minimum=16, maximum=256, value=128, step=16, label="Evolutionary sims (evo mode)"),
+        gr.Slider(minimum=2, maximum=10, value=8, step=1, label="Turns per sim (evo mode)"),
+        gr.Slider(minimum=3, maximum=20, value=12, step=1, label="Judge top-K (quality vs speed)"),
         gr.Dropdown(choices=["Off", "Light"], value="Light", label="PsycheHat backend (lightweight)"),
-        gr.Checkbox(value=False, label="Use deep PsycheHat (requires torch + chromadb)"),
+        gr.Checkbox(value=True, label="Use deep PsycheHat (requires torch + chromadb)"),
         gr.Checkbox(value=False, label="A/B test PsycheHat (every other sim uses hat approach)"),
-        gr.Checkbox(value=False, label="Use GenerativeAgents in rollouts (slower, more coherent)"),
+        gr.Checkbox(value=True, label="Use GenerativeAgents in rollouts (slower, more coherent)"),
         gr.Slider(minimum=4, maximum=30, value=12, step=1, label="Candidate plans"),
         gr.Slider(minimum=4, maximum=60, value=24, step=1, label="Judge samples (stability vs speed)"),
     ],

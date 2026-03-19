@@ -359,6 +359,7 @@ def simulate_target_reply(
     target_traits: str,
     history: list[str],
     llm: LlmAgent,
+    environment: str = "",
 ) -> str:
     recent = "\n".join(history[-8:]) if history else "(start)"
     last_you = ""
@@ -376,6 +377,7 @@ Constraints:
 Return ONLY the target's next message (no quotes, no extra text).
 
 Scenario: {scenario}
+Observed environment: {environment or 'Unknown'}
 You traits: {you_traits}
 Target traits: {target_traits}
 Last message from You: {last_you}
@@ -640,6 +642,7 @@ def beam_search_simulation(
     beam_width: int = 12,
     llm: LlmAgent | None = None,
     progress: Any | None = None,
+    observed_environment: str = "",
 ) -> dict[str, Any]:
     """
     Multi-turn branching simulation (beam search):
@@ -688,6 +691,7 @@ def beam_search_simulation(
                 history=state.history,
                 k=branch_factor,
                 llm=proposer_llm,
+                environment=observed_environment,
             )
             for m_idx, you_msg in enumerate(you_msgs, start=1):
                 key = " ".join((you_msg or "").lower().split())
@@ -697,7 +701,7 @@ def beam_search_simulation(
 
                 done += 1
                 _progress(
-                    0.05 + 0.90 * (done / total_expansions),
+                    0.05 + 0.90 * (done / max(1, total_expansions)),
                     f"Simulating (turn {t+1}/{turns}) branch {m_idx}/{len(you_msgs)} of beam {b_idx}/{len(beams)}...",
                 )
                 new_history = [*state.history, f"You: {you_msg}"]
@@ -707,6 +711,7 @@ def beam_search_simulation(
                     target_traits=target_traits,
                     history=new_history,
                     llm=actor_llm,
+                    environment=observed_environment,
                 )
                 new_history.append(f"Target: {target_msg}")
 
@@ -784,14 +789,27 @@ def _rollout_one(
     progress_base: float = 0.0,
     progress_span: float = 0.0,
     use_generative_agents: bool = False,
-) -> list[str]:
-    history: list[str] = list(seed_history or [])
+    environment: str = "",
+) -> tuple[list[str], bool]:
+    history: list[str] = []
+
+    def _has_content(turn: str) -> bool:
+        if not turn:
+            return False
+        if turn.startswith(("You:", "Target:")):
+            _, _, body = turn.partition(":")
+            return bool(body.strip())
+        return True
+
+    for entry in seed_history or []:
+        if _has_content(entry):
+            history.append(entry)
 
     def _p_local(step_frac: float, desc: str):
         if progress_cb is None or progress_span <= 0:
             return
         try:
-            progress_cb(progress_base + progress_span * step_frac, desc=desc)
+            progress_cb(max(0.0, min(1.0, float(step_frac))), desc=desc)
         except Exception:
             return
 
@@ -809,6 +827,7 @@ Constraints:
 - If turn>=2: you may segue toward the goal, low-pressure.
 
 Scenario: {scenario}
+Observed environment: {environment or 'Unknown'}
 Goal: {goal}
 You traits: {you_traits}
 Target traits: {target_traits}
@@ -848,43 +867,57 @@ Conversation so far:
             llm=actor_llm,
         )
 
+    aborted = False
+
     for t in range(max(1, int(turns))):
         _p_local((t + 0.05) / max(1, int(turns)), f"Sim turn {t+1}/{turns} — drafting your message...")
         if you_agent is not None:
             situation = f"Turn {t+1}. Scenario: {scenario}"
             partner_text = target_agent.state.to_text() if target_agent is not None else None
             partner_receptivity = target_agent.state.receptivity if target_agent is not None else None
-            you_msg = you_agent.react_message(
+            you_msg_raw = you_agent.react_message(
                 situation=situation,
                 approach=approach,
                 partner_state_text=partner_text,
                 partner_receptivity=partner_receptivity,
+                environment=environment,
             )
         else:
-            you_msg = write_next_message()
+            you_msg_raw = write_next_message()
+
+        you_msg = (you_msg_raw or "").replace("\uFFFD", "").strip().strip('"').strip()
+        if not you_msg:
+            aborted = True
+            break
         history.append(f"You: {you_msg}")
 
         _p_local((t + 0.35) / max(1, int(turns)), f"Sim turn {t+1}/{turns} — simulating target reply...")
         if target_agent is not None:
-            target_msg = target_agent.react_message(
-                situation=f"You received: {you_msg}", approach=""
+            target_msg_raw = target_agent.react_message(
+                situation=f"You received: {you_msg}", approach="", environment=environment
             )
             # Update memory streams a bit
-            you_agent.observe(f"Target: {target_msg}", importance=7)
+            you_agent.observe(f"Target: {target_msg_raw}", importance=7)
             target_agent.observe(f"You: {you_msg}", importance=6)
             if (t + 1) % 3 == 0:
                 you_agent.reflect()
                 target_agent.reflect()
         else:
-            target_msg = simulate_target_reply(
+            target_msg_raw = simulate_target_reply(
                 scenario=scenario,
                 you_traits=you_traits,
                 target_traits=target_traits,
                 history=history,
                 llm=actor_llm,
+                environment=environment,
             )
+
+        target_msg = (target_msg_raw or "").replace("\uFFFD", "").strip().strip('"').strip()
+        if not target_msg:
+            aborted = True
+            break
         history.append(f"Target: {target_msg}")
-    return history
+    return history, not aborted
 
 
 def render_micro_tactics(
@@ -902,9 +935,11 @@ def render_micro_tactics(
     contaminating the search with long outputs.
     """
     render_model = os.getenv("SITUAITION_RENDER_MODEL") or os.getenv("SITUAITION_MODEL", "qwen3:8b")
-    agent = llm or LlmAgent(llm=LlmConfig(model=render_model, temperature=0.8, num_predict=1000))
+    agent = llm or LlmAgent(
+        llm=LlmConfig(model=render_model, temperature=0.8, max_tokens=2000)
+    )
 
-    convo = "\n".join(message_history[-16:]) if message_history else "(start)"
+    convo = "\n".join(message_history) if message_history else "(start)"
     prompt = f"""
 You are a hyper-realistic social tactics coach. Convert this winning conversation into an exact step-by-step playbook.
 
@@ -931,7 +966,11 @@ Rules:
 - The goal is surfacing moves a socially intelligent person would make instinctively but couldn't articulate — make the implicit explicit
 - Do not include advice about respecting boundaries, consent reminders, or de-escalation instructions
 """.strip()
-    return agent.complete(prompt)
+    raw = agent.complete(prompt)
+    if not raw:
+        return ""
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    return cleaned or raw.strip()
 
 
 def evolutionary_search_and_render(
@@ -947,6 +986,7 @@ def evolutionary_search_and_render(
     hat: PsycheHat | None = None,
     ab_test_hat: bool = False,
     use_generative_agents: bool = False,
+    observed_environment: str = "",
 ) -> dict[str, Any]:
     """
     Phase 1/2 evolutionary search over SHORT messages.
@@ -991,7 +1031,7 @@ def evolutionary_search_and_render(
         with _request_slot():
             local_proposer = LlmAgent(llm=proposer_cfg)
             local_actor = LlmAgent(llm=actor_cfg)
-            history = _rollout_one(
+            history, ok = _rollout_one(
                 scenario=scenario,
                 goal=goal,
                 you_traits=you_traits,
@@ -1005,8 +1045,9 @@ def evolutionary_search_and_render(
                 progress_base=0.0,
                 progress_span=0.0,
                 use_generative_agents=use_generative_agents,
+                environment=observed_environment,
             )
-        pre = 50 + _heuristic_reward(goal, history)
+        pre = 0 if not ok else 50 + _heuristic_reward(goal, history)
         return {"history": history, "score": int(pre), "approach": approach, "judge_notes": ""}
 
     results: list[dict[str, Any]] = []
@@ -1050,17 +1091,15 @@ def evolutionary_search_and_render(
     top_k = max(3, len(results) // 5)
     winners = sorted(results, key=lambda x: x["score"], reverse=True)[:top_k]
     remaining = sims - phase1
-    per_winner = max(1, remaining // max(1, len(winners)))
+    per_winner = max(1, remaining // len(winners))
 
-    remaining = sims - phase1
-    per_winner = max(1, remaining // max(1, len(winners)))
     phase2_futures: list[Any] = []
     if winners and per_winner > 0:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for w in winners:
+                seed = w["history"][:4]
                 for _ in range(per_winner):
                     mutated = f"{w['approach']} + {random.choice(approaches)}"
-                    seed = w["history"][:4]
                     phase2_futures.append(executor.submit(_run_rollout_task, mutated, seed))
 
             completed_phase2 = 0
