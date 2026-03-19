@@ -4,6 +4,7 @@ import json
 import os
 import re
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -805,21 +806,13 @@ def evolutionary_search_and_render(
         if hat_rec and hat_rec not in approaches:
             approaches.insert(0, hat_rec)
 
-    proposer_llm = LlmAgent(llm=LlmConfig(temperature=0.95, num_predict=120))
-    actor_llm = LlmAgent(llm=LlmConfig(temperature=0.85, num_predict=140))
+    proposer_cfg = LlmConfig(temperature=0.95, num_predict=120)
+    actor_cfg = LlmConfig(temperature=0.85, num_predict=140)
     judge_llm = LlmAgent(llm=LlmConfig(temperature=0.15, num_predict=120))
 
-    results: list[dict[str, Any]] = []
-    sims = max(8, int(num_sims))
-    phase1 = sims // 2
-
-    # ── Phase 1: explore ─────────────────────────────────────────
-    for i in range(phase1):
-        _p((i + 0.10) / sims, f"Phase 1 — exploring {i+1}/{phase1}...")
-        approach = random.choice(approaches)
-        # Optional A/B: every other sim uses the hat recommendation as a bias (if any).
-        if ab_test_hat and hat_rec and i % 2 == 0:
-            approach = hat_rec
+    def _run_rollout_task(approach: str, seed_history: list[str] | None) -> dict[str, Any]:
+        local_proposer = LlmAgent(llm=proposer_cfg)
+        local_actor = LlmAgent(llm=actor_cfg)
         history = _rollout_one(
             scenario=scenario,
             goal=goal,
@@ -827,17 +820,43 @@ def evolutionary_search_and_render(
             target_traits=target_traits,
             turns=turns,
             approach=approach,
-            seed_history=None,
-            proposer_llm=proposer_llm,
-            actor_llm=actor_llm,
-            progress_cb=progress,
-            progress_base=(i / sims),
-            progress_span=(0.8 / sims),
+            seed_history=seed_history,
+            proposer_llm=local_proposer,
+            actor_llm=local_actor,
+            progress_cb=None,
+            progress_base=0.0,
+            progress_span=0.0,
             use_generative_agents=use_generative_agents,
         )
-        # Cheap pre-score; we will LLM-judge only the top few later (much faster).
         pre = 50 + _heuristic_reward(goal, history)
-        results.append({"history": history, "score": int(pre), "approach": approach, "judge_notes": ""})
+        return {"history": history, "score": int(pre), "approach": approach, "judge_notes": ""}
+
+    results: list[dict[str, Any]] = []
+    sims = max(8, int(num_sims))
+    phase1 = sims // 2
+
+    max_workers_env = os.getenv("SITUAITION_MAX_WORKERS", "4")
+    try:
+        max_workers_cfg = int(max_workers_env)
+    except (TypeError, ValueError):  # pragma: no cover - env parsing
+        max_workers_cfg = 4
+    max_workers = max(1, min(max_workers_cfg, sims))
+
+    # ── Phase 1: explore ─────────────────────────────────────────
+    phase1_futures: list[Any] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for i in range(phase1):
+            approach = random.choice(approaches)
+            if ab_test_hat and hat_rec and i % 2 == 0:
+                approach = hat_rec
+            phase1_futures.append(executor.submit(_run_rollout_task, approach, None))
+
+        completed_phase1 = 0
+        for future in as_completed(phase1_futures):
+            payload = future.result()
+            completed_phase1 += 1
+            _p((completed_phase1 + 0.10) / max(1, sims), f"Phase 1 — exploring {completed_phase1}/{phase1}...")
+            results.append(payload)
 
     # LLM-judge only the top K from phase 1 to create real separation.
     k1 = max(3, min(int(judge_top_k), len(results)))
@@ -855,29 +874,25 @@ def evolutionary_search_and_render(
     remaining = sims - phase1
     per_winner = max(1, remaining // max(1, len(winners)))
 
-    for w_idx, w in enumerate(winners, start=1):
-        for m in range(per_winner):
-            done = phase1 + (w_idx - 1) * per_winner + m
-            _p((done + 0.10) / sims, f"Phase 2 — branching winner {w_idx}/{len(winners)}...")
-            mutated = f"{w['approach']} + {random.choice(approaches)}"
-            seed = w["history"][:4]  # seed ~2 exchanges (You+Target)
-            history = _rollout_one(
-                scenario=scenario,
-                goal=goal,
-                you_traits=you_traits,
-                target_traits=target_traits,
-                turns=turns,
-                approach=mutated,
-                seed_history=seed,
-                proposer_llm=proposer_llm,
-                actor_llm=actor_llm,
-                progress_cb=progress,
-                progress_base=(done / sims),
-                progress_span=(0.7 / sims),
-                use_generative_agents=use_generative_agents,
-            )
-            pre = 50 + _heuristic_reward(goal, history)
-            results.append({"history": history, "score": int(pre), "approach": mutated, "judge_notes": ""})
+    remaining = sims - phase1
+    per_winner = max(1, remaining // max(1, len(winners)))
+    phase2_futures: list[Any] = []
+    if winners and per_winner > 0:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for w in winners:
+                for _ in range(per_winner):
+                    mutated = f"{w['approach']} + {random.choice(approaches)}"
+                    seed = w["history"][:4]
+                    phase2_futures.append(executor.submit(_run_rollout_task, mutated, seed))
+
+            completed_phase2 = 0
+            total_phase2 = len(phase2_futures)
+            for future in as_completed(phase2_futures):
+                payload = future.result()
+                completed_phase2 += 1
+                progress_idx = phase1 + completed_phase2
+                _p((progress_idx + 0.10) / max(1, sims), f"Phase 2 — branching {completed_phase2}/{max(1, total_phase2)}...")
+                results.append(payload)
 
     # LLM-judge only top K overall before choosing the winner.
     k2 = max(5, min(int(judge_top_k) * 2, len(results)))
