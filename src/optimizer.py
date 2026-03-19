@@ -390,8 +390,8 @@ Judge this conversation for:
 - Likelihood of a positive outcome toward the goal
 - Respect/consent/honesty/low-pressure (must be high)
 - Bonus points if the approach is unexpected, non-generic, or uses environmental/context clues creatively (not just polite script)
-- Deduct heavily if the same ask is repeated multiple times with no new information
-- Deduct if "You" confuses identities (claims to be the Target or reuses their handle)
+- Deduct heavily if the same ask (especially IG/contact) is repeated; a duplicate Instagram ask should cost at least 25 points
+- Deduct at least 20 points if "You" confuses identities, refers to themself as the Target, or reuses the Target's handle
 
 If there is pressure, deception, or ignoring a "no", score should drop sharply.
 Output ONLY JSON with keys: score (int 0-100), notes (string).
@@ -539,13 +539,10 @@ def _repetition_penalty(history: list[str]) -> int:
             continue
         normalized_counts[cleaned] = normalized_counts.get(cleaned, 0) + 1
 
-    penalty = sum((count - 1) * 12 for count in normalized_counts.values() if count > 1)
+    penalty = sum((count - 1) * 15 for count in normalized_counts.values() if count > 1)
 
-    keyword_hits: dict[str, int] = {}
-    keywords = (
-        "instagram",
-        "insta",
-        "ig",
+    ig_keywords = ("instagram", "insta", "ig", "@")
+    contact_keywords = ig_keywords + (
         "phone",
         "number",
         "snap",
@@ -557,13 +554,21 @@ def _repetition_penalty(history: list[str]) -> int:
         "text you",
         "whatsapp",
     )
-    for msg in you_lines:
-        for kw in keywords:
-            if kw in msg:
-                keyword_hits[kw] = keyword_hits.get(kw, 0) + 1
-    penalty += sum((hits - 1) * 6 for hits in keyword_hits.values() if hits > 1)
 
-    return min(50, penalty)
+    contact_hits = 0
+    ig_hits = 0
+    for msg in you_lines:
+        if any(kw in msg for kw in contact_keywords):
+            contact_hits += 1
+        if any(kw in msg for kw in ig_keywords):
+            ig_hits += 1
+
+    if ig_hits > 1:
+        penalty = max(penalty, 25 + max(0, ig_hits - 2) * 10)
+    elif contact_hits > 1:
+        penalty += (contact_hits - 1) * 12
+
+    return min(70, penalty)
 
 
 def _identity_confusion_penalty(history: list[str]) -> int:
@@ -580,23 +585,31 @@ def _identity_confusion_penalty(history: list[str]) -> int:
             target_handles.add(handle.lower())
 
     penalty = 0
+    confused = False
     you_lines = [line.split(":", 1)[1].strip() for line in history if line.startswith("You:")]
     for msg in you_lines:
         lower = msg.lower()
         if lower.startswith("target:"):
             penalty += 15
+            confused = True
         if "target here" in lower or "this is target" in lower:
-            penalty += 10
+            penalty += 12
+            confused = True
         for name in target_names:
             if re.search(rf"(?:i'm|i am|this is|it's)\s+{re.escape(name)}\b", lower):
                 penalty += 12
+                confused = True
                 break
         for handle in target_handles:
             if handle in lower:
-                penalty += 10
+                penalty += 12
+                confused = True
                 break
 
-    return min(45, penalty)
+    if confused:
+        penalty = max(20, penalty)
+
+    return min(60, penalty)
 
 
 def beam_search_simulation(
