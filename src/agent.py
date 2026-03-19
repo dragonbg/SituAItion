@@ -402,7 +402,10 @@ class GenerativeAgent:
             if delta is None:
                 fallback_raw = self._state_delta_llm.complete(prompt, json_mode=False)
                 delta = self._parse_state_delta(fallback_raw)
-        except Exception:
+        except Exception as e:
+            self._delta_fallbacks = getattr(self, "_delta_fallbacks", 0) + 1
+            if self._delta_fallbacks <= 3:
+                print(f"[PAD-DELTA FAIL] {type(e).__name__}: {e}")
             return
         if delta:
             self.state.apply_delta(delta)
