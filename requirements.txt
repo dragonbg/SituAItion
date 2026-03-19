@@ -10,4 +10,5 @@ groq
 tqdm
 chromadb
 torch
+python-dotenv
 
