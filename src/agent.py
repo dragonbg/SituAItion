@@ -98,6 +98,7 @@ class LlmAgent:
             "messages":    [{"role": "user", "content": prompt}],
             "temperature": self.llm.temperature,
             "max_tokens":  self.llm.num_predict,
+            "service_tier": "auto",
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}

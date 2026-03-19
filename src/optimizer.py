@@ -901,7 +901,8 @@ def render_micro_tactics(
     hyper-granular micro-tactics (timing/body language/exact words), without
     contaminating the search with long outputs.
     """
-    agent = llm or LlmAgent(llm=LlmConfig(temperature=0.8, num_predict=1000))
+    render_model = os.getenv("SITUAITION_RENDER_MODEL") or os.getenv("SITUAITION_MODEL", "qwen3:8b")
+    agent = llm or LlmAgent(llm=LlmConfig(model=render_model, temperature=0.8, num_predict=1000))
 
     convo = "\n".join(message_history[-16:]) if message_history else "(start)"
     prompt = f"""
