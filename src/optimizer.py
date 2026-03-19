@@ -23,7 +23,7 @@ from src.psyche_hat import PsycheHat
 
 LOG_PROGRESS = os.getenv("SITUAITION_LOG_PROGRESS", "").strip().lower() in {"1", "true", "yes"}
 _BACKEND = os.getenv("SITUAITION_BACKEND", "").strip().lower()
-_MAX_CONCURRENT_REQUESTS = 20 if _BACKEND == "groq" else 0
+_MAX_CONCURRENT_REQUESTS = 10 if _BACKEND == "groq" else 0
 _REQUEST_SEMAPHORE = threading.Semaphore(_MAX_CONCURRENT_REQUESTS) if _MAX_CONCURRENT_REQUESTS else None
 
 

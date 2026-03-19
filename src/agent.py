@@ -28,7 +28,7 @@ BACKEND = os.getenv("SITUAITION_BACKEND", "ollama").lower()
 
 @dataclass(frozen=True)
 class LlmConfig:
-    model:       str   = os.getenv("SITUAITION_MODEL", "qwen3:8b")
+    model:       str   = os.getenv("SITUAITION_MODEL", "openai/gpt-oss-120b")
     temperature: float = 0.85
     num_predict: int   = 450
     timeout_s:   float = 180.0
