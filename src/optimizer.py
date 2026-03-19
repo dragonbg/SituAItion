@@ -919,13 +919,13 @@ def evolutionary_search_and_render(
             return
 
     approaches = [
-        "warm opener + situational comment",
-        "humor + curiosity",
-        "shared interest probe",
-        "direct but low-pressure",
-        "slow build then ask",
-        "compliment something non-physical + segue",
-        "callback + inside joke vibe",
+        "strategic pause before responding",
+        "callback to environmental detail",
+        "false disinterest pivot",
+        "misinterpret-then-correct",
+        "redirect to observation about surroundings",
+        "playful challenge with quick soften",
+        "sincere vulnerability burst",
     ]
 
     # If enabled, use PsycheHat to bias one of the approaches (A/B test).
