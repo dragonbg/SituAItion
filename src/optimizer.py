@@ -390,6 +390,8 @@ Judge this conversation for:
 - Likelihood of a positive outcome toward the goal
 - Respect/consent/honesty/low-pressure (must be high)
 - Bonus points if the approach is unexpected, non-generic, or uses environmental/context clues creatively (not just polite script)
+- Deduct heavily if the same ask is repeated multiple times with no new information
+- Deduct if "You" confuses identities (claims to be the Target or reuses their handle)
 
 If there is pressure, deception, or ignoring a "no", score should drop sharply.
 Output ONLY JSON with keys: score (int 0-100), notes (string).
@@ -399,6 +401,7 @@ Goal: {goal}
 Conversation (recent):
 {recent}
 """.strip()
+
     def _try(raw_text: str) -> tuple[int, str] | None:
         data0 = _safe_json_loads(raw_text)
         if not isinstance(data0, dict):
@@ -433,8 +436,12 @@ Conversation (recent):
         score, notes = parsed
 
     text_blob = " ".join(history[-12:])
-    score = max(0, min(100, int(score) - _red_flag_penalty(text_blob)))
-    score = max(0, min(100, score + _novelty_bonus(history)))
+    score = int(score)
+    score -= _red_flag_penalty(text_blob)
+    score -= _repetition_penalty(history)
+    score -= _identity_confusion_penalty(history)
+    score += _novelty_bonus(history)
+    score = max(0, min(100, score))
     return score, notes or (raw[:250] if raw else "")
 
 
@@ -516,6 +523,80 @@ def _novelty_bonus(history: list[str]) -> int:
         bonus += 1
 
     return min(8, bonus)
+
+
+def _repetition_penalty(history: list[str]) -> int:
+    """Penalize repeating the same ask or keyword over and over."""
+    you_lines = [line.split(":", 1)[1].strip().lower() for line in history if line.startswith("You:")]
+    if not you_lines:
+        return 0
+
+    normalized_counts: dict[str, int] = {}
+    for msg in you_lines:
+        cleaned = re.sub(r"[^a-z0-9@ ]+", " ", msg)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            continue
+        normalized_counts[cleaned] = normalized_counts.get(cleaned, 0) + 1
+
+    penalty = sum((count - 1) * 12 for count in normalized_counts.values() if count > 1)
+
+    keyword_hits: dict[str, int] = {}
+    keywords = (
+        "instagram",
+        "insta",
+        "ig",
+        "phone",
+        "number",
+        "snap",
+        "snapchat",
+        "tiktok",
+        "handle",
+        "contact",
+        "dm",
+        "text you",
+        "whatsapp",
+    )
+    for msg in you_lines:
+        for kw in keywords:
+            if kw in msg:
+                keyword_hits[kw] = keyword_hits.get(kw, 0) + 1
+    penalty += sum((hits - 1) * 6 for hits in keyword_hits.values() if hits > 1)
+
+    return min(50, penalty)
+
+
+def _identity_confusion_penalty(history: list[str]) -> int:
+    """Penalize when the "You" agent impersonates or borrows the Target identity."""
+    target_names: set[str] = set()
+    target_handles: set[str] = set()
+    for line in history:
+        if not line.startswith("Target:"):
+            continue
+        content = line.split(":", 1)[1].strip()
+        for match in re.findall(r"(?:i'm|i am|my name is|this is)\s+([A-Za-z][A-Za-z\-']{1,})", content, flags=re.IGNORECASE):
+            target_names.add(match.lower())
+        for handle in re.findall(r"@[A-Za-z0-9_.-]+", content):
+            target_handles.add(handle.lower())
+
+    penalty = 0
+    you_lines = [line.split(":", 1)[1].strip() for line in history if line.startswith("You:")]
+    for msg in you_lines:
+        lower = msg.lower()
+        if lower.startswith("target:"):
+            penalty += 15
+        if "target here" in lower or "this is target" in lower:
+            penalty += 10
+        for name in target_names:
+            if re.search(rf"(?:i'm|i am|this is|it's)\s+{re.escape(name)}\b", lower):
+                penalty += 12
+                break
+        for handle in target_handles:
+            if handle in lower:
+                penalty += 10
+                break
+
+    return min(45, penalty)
 
 
 def beam_search_simulation(
