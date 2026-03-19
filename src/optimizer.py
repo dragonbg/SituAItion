@@ -1144,6 +1144,7 @@ def evolutionary_search_and_render(
         )
 
     _p(0.99, "Done.")
+    print("Winner history length:", len(best.get("history", [])))
     return {
         "best": best,
         "playbook": playbook,
