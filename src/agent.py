@@ -264,9 +264,9 @@ class GenerativeAgent:
         base_cfg = self.llm.llm
         self._state_delta_llm = LlmAgent(
             llm=LlmConfig(
-                model=base_cfg.model,
+                model="llama-3.3-70b-versatile",
                 temperature=base_cfg.temperature,
-                num_predict=80,
+                num_predict=150,
                 timeout_s=base_cfg.timeout_s,
                 keep_alive=base_cfg.keep_alive,
             )
