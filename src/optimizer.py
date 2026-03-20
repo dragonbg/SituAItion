@@ -835,7 +835,9 @@ Approach style hint: {approach}
 Conversation so far:
 {recent}
 """.strip()
+        print(f"[PROPOSE] calling LLM, model={proposer_llm.llm.model}")
         msg = (proposer_llm.complete(prompt, json_mode=False) or "").replace("\uFFFD", "").strip()
+
         if not msg:
             return "Hey—how’s your day going so far?" if early else "By the way—are you on Instagram? No worries if not."
         # Strip accidental bullets/quotes
@@ -885,6 +887,7 @@ Conversation so far:
         else:
             you_msg_raw = write_next_message()
 
+        print(f"[ROLLOUT] you_msg_raw={repr(you_msg_raw[:100] if you_msg_raw else None)}")
         you_msg = (you_msg_raw or "").replace("\uFFFD", "").strip().strip('"').strip()
         if not you_msg:
             aborted = True
@@ -917,6 +920,7 @@ Conversation so far:
             aborted = True
             break
         history.append(f"Target: {target_msg}")
+    print(f"[ROLLOUT] history len={len(history)}")
     return history, not aborted
 
 
@@ -936,7 +940,7 @@ def render_micro_tactics(
     """
     render_model = os.getenv("SITUAITION_RENDER_MODEL") or os.getenv("SITUAITION_MODEL", "qwen3:8b")
     agent = llm or LlmAgent(
-        llm=LlmConfig(model=render_model, temperature=0.8, num_predict=2000)
+        llm=LlmConfig(model=render_model, temperature=0.8, max_tokens=2000)
     )
 
     convo = "\n".join(message_history) if message_history else "(start)"
